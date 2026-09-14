@@ -1,4 +1,3 @@
-.PHONY: check lint test test-tls test-nostd test-prove build-openvm prove-openvm prove-examples fix build dev act help
 
 help:
 	@echo "Usage: make <target>"
@@ -10,16 +9,11 @@ help:
 	@echo "  test-unit      unit tests only (cargo test --lib)"
 	@echo "  test-int       integration tests only (cargo test --tests)"
 	@echo "  test-nostd     no_std + no-poseidon builds (zkVM guest configurations)"
-	@echo "  test-prove     Noir nargo+bb prove/verify pipeline (slow; pre-PR gate)"
-	@echo "  build-openvm   build + transpile the OpenVM guest (needs cargo-openvm)"
-	@echo "  prove-openvm   full OpenVM pipeline on examples/simple.lua: compile -> prove -> verify"
-	@echo "  prove-examples run every examples/*.lua through the OpenVM pipeline"
 	@echo "  fix            auto-format + apply safe clippy fixes"
-	@echo "  test-tls       cargo test --features tls --test tls"
 	@echo "  build          cargo build"
 
 # CI target — must pass before merging
-check: lint test test-tls test-nostd
+check: lint test test-nostd
 
 # Format check + clippy (warnings are errors)
 lint:
@@ -29,12 +23,6 @@ lint:
 # All tests: unit (within modules) + integration (tests/)
 test:
 	cargo test
-
-# TLS attestation tests. `tls` is not a default feature (it is one provenance
-# provider, not part of the runtime), so plain `cargo test` does not reach
-# tests/tls.rs. The two tests that need network are #[ignore]d.
-test-tls:
-	cargo test -p proveno --features tls --test tls
 
 # Unit tests only
 test-unit:
@@ -53,48 +41,8 @@ test-integration:
 # compile at all. `test` already runs the suite under default features.
 test-nostd:
 	RUSTFLAGS="-D warnings" cargo build -p proveno --no-default-features
-	RUSTFLAGS="-D warnings" cargo build -p proveno --no-default-features --features zkvm
-	RUSTFLAGS="-D warnings" cargo build -p proveno --no-default-features --features "std,zkvm"
-	cargo test -p proveno --no-default-features --features "std,zkvm"
-
-# Build and transpile the OpenVM guest for riscv32im-risc0-zkvm-elf.
-#
-# Not part of `make check`: it needs the cargo-openvm CLI and the pinned
-# nightly toolchain. `make test-nostd` already covers the feature
-# configurations this depends on, which is what actually breaks.
-#
-# To execute the guest and see it reveal proveno's SHA-256 tape commitment:
-#   cargo openvm run -p proveno-openvm --input 0x010a00000000000000
-build-openvm:
-	cargo openvm build -p proveno-openvm
-
-# End-to-end OpenVM proof of examples/simple.lua.
-#
-# compile -> dry run -> guest input -> app proof -> verify. Prints the expected
-# journal digest before proving; the guest reveals exactly that value.
-#
-# Needs cargo-openvm and a one-off `cargo openvm keygen --app-only` (writes
-# openvm/app.pk and openvm/app.vk, both gitignored). Not part of `make check`.
-prove-openvm:
-	cargo run -q -p proveno-compiler -- examples/simple.lua target/openvm-demo.compiled.json
-	cargo run -q -p proveno-witness -- target/openvm-demo.compiled.json target/openvm-demo.dry.json
-	cargo run -q -p proveno-openvm-host -- \
-		target/openvm-demo.compiled.json target/openvm-demo.dry.json \
-		--out target/openvm-demo.input.json --prove
-
-# Run every examples/*.lua through compile -> dry run -> prove -> verify and
-# report which stage each one reaches. Makes live HTTP calls (several examples
-# fetch real price data), so it needs network. Not part of `make check`.
-prove-examples:
-	./prove-examples.sh
-
-# Noir prove/verify pipeline (nargo execute + bb write_vk/prove/verify).
-# Slow (~30 s); not part of `make test`. Required pre-PR gate when touching
-# the Noir circuit, witness writer, oracle tape, or related encoders.
-# Prints prove/verify wall-time per test so regressions are visible.
-# Requires `nargo` and `bb` on PATH.
-test-prove:
-	cargo test -p proveno-noir --test prove -- --nocapture
+	RUSTFLAGS="-D warnings" cargo build -p proveno --no-default-features --features "std"
+	cargo test -p proveno --no-default-features --features "std"
 
 # Auto-fix formatting and apply safe clippy suggestions
 fix:

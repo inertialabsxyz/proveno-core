@@ -7,15 +7,9 @@ pub mod bytecode;
 pub mod compiler;
 pub mod host;
 pub mod isa;
-pub mod noir;
 pub mod parser;
-pub mod policy;
-pub mod tls;
 pub mod types;
 pub mod vm;
-
-#[cfg(feature = "zkvm")]
-pub mod zkvm;
 
 pub use host::tape::{OracleTape, TapeEntry, TapeHost};
 pub use host::transcript::{ToolCallRecord, ToolCallStatus, Transcript};
