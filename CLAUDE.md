@@ -144,6 +144,8 @@ Lua source
   `rawset_tracked()` returns `RawsetResult` for memory accounting.
 - **`host/`** — `ToolRegistry<H>` enforces per-call quotas and records a
   `Transcript`. `OracleTape` / `TapeHost` enable deterministic replay.
+  `TapeHost::strict` reports the first call that differs from the tape via
+  `divergence()`; `Vm::{transcript, gas_used, memory_used, host}` survive `Err`.
   `canonical_serialize()` is the one reproducible JSON encoding.
   **Knows nothing about policy**: enforcement is a host wrapper, supplied by
   proveno-zk.
