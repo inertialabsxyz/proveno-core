@@ -195,6 +195,27 @@ impl<H: HostInterface> Vm<H> {
         }
     }
 
+    /// The host the VM was built with.
+    pub fn host(&self) -> &H {
+        self.registry.host()
+    }
+
+    /// Tool calls recorded by the last `execute`, including a failed call that
+    /// ended the run. Valid whether `execute` returned `Ok` or `Err`.
+    pub fn transcript(&self) -> &[ToolCallRecord] {
+        self.transcript.records()
+    }
+
+    /// Gas consumed so far. Valid whether `execute` returned `Ok` or `Err`.
+    pub fn gas_used(&self) -> u64 {
+        self.gas.used()
+    }
+
+    /// Memory in use as metered. Valid whether `execute` returned `Ok` or `Err`.
+    pub fn memory_used(&self) -> u64 {
+        self.mem.used()
+    }
+
     pub fn execute(
         &mut self,
         program: &CompiledProgram,

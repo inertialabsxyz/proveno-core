@@ -37,6 +37,11 @@ impl<H: HostInterface> ToolRegistry<H> {
         }
     }
 
+    /// The wrapped host, e.g. to read a `TapeHost`'s divergence after a run.
+    pub fn host(&self) -> &H {
+        &self.host
+    }
+
     /// Reset counters for a new execution.
     pub fn reset(&mut self) {
         self.calls_made = 0;
