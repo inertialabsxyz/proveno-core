@@ -14,7 +14,10 @@ use crate::host::poseidon2::{
     bytes_to_fields, field_to_be_bytes32, poseidon2_hash, u8_to_field, u32_to_field,
 };
 use crate::{
-    host::{canonicalize::canonical_deserialize, transcript::ToolCallRecord},
+    host::{
+        canonicalize::{canonical_deserialize, canonical_serialize_table},
+        transcript::ToolCallRecord,
+    },
     types::{table::LuaTable, value::LuaValue},
     vm::engine::HostInterface,
 };
@@ -35,6 +38,29 @@ pub enum TapeEntry {
     Err(String),
 }
 
+// ── TapeCall / Divergence ────────────────────────────────────────────────────
+
+/// The call a tape entry answered: tool name and canonical JSON args.
+///
+/// Carried for strict replay only. It is not part of any commitment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TapeCall {
+    pub tool_name: String,
+    pub args_canonical: Vec<u8>,
+}
+
+/// The first point at which a strict replay departed from the tape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Divergence {
+    /// 0-indexed tool call sequence number, as in `ToolCallRecord::seq`.
+    pub seq: usize,
+    /// The recorded call, or `None` when the tape has no call at `seq`.
+    pub expected: Option<TapeCall>,
+    /// The call the replayed program made.
+    pub actual: TapeCall,
+}
+
 // ── OracleTape ───────────────────────────────────────────────────────────────
 
 /// An ordered sequence of pre-recorded tool responses.
@@ -52,6 +78,11 @@ pub struct OracleTape {
     /// attestations; only `attestation_commitment()` binds them.
     #[cfg_attr(feature = "serde", serde(default))]
     pub attestations: Vec<Vec<u8>>,
+    /// Per-entry recorded calls, positionally aligned with `entries`. Used by
+    /// `TapeHost::strict` to detect divergence. Deliberately excluded from
+    /// every commitment, so the proved claim is unchanged by its presence.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub calls: Vec<TapeCall>,
 }
 
 impl OracleTape {
@@ -59,6 +90,7 @@ impl OracleTape {
         OracleTape {
             entries: Vec::new(),
             attestations: Vec::new(),
+            calls: Vec::new(),
         }
     }
 
@@ -76,9 +108,17 @@ impl OracleTape {
             })
             .collect();
         let attestations = records.iter().map(|r| r.attestation.clone()).collect();
+        let calls = records
+            .iter()
+            .map(|r| TapeCall {
+                tool_name: r.tool_name.clone(),
+                args_canonical: r.args_canonical.clone(),
+            })
+            .collect();
         OracleTape {
             entries,
             attestations,
+            calls,
         }
     }
 
@@ -348,14 +388,74 @@ impl OracleTape {
 /// - `TapeEntry::Err(msg)` — returns `Err(msg)`.
 ///
 /// If the tape is exhausted (more calls than entries), an error is returned.
+///
+/// `TapeHost::new` is positional and ignores the tool name and args it is
+/// called with. `TapeHost::strict` also checks each call against
+/// `OracleTape::calls` and fails on the first mismatch.
 pub struct TapeHost {
     tape: OracleTape,
     cursor: usize,
+    strict: bool,
+    divergence: Option<Divergence>,
 }
 
 impl TapeHost {
     pub fn new(tape: OracleTape) -> Self {
-        TapeHost { tape, cursor: 0 }
+        TapeHost {
+            tape,
+            cursor: 0,
+            strict: false,
+            divergence: None,
+        }
+    }
+
+    /// A replay host that requires each call's tool name and canonical args
+    /// to equal the recorded call at the same sequence number.
+    ///
+    /// On a mismatch, an extra call, or a tape that carries entries but no
+    /// call data, the call fails with `replay diverged at seq N` and the first
+    /// such point is kept in [`TapeHost::divergence`]. Once diverged, every
+    /// later call fails the same way, so catching the error with `pcall`
+    /// cannot resynchronise the replay.
+    pub fn strict(tape: OracleTape) -> Self {
+        TapeHost {
+            strict: true,
+            ..TapeHost::new(tape)
+        }
+    }
+
+    /// The first divergence seen by a strict replay, if any.
+    pub fn divergence(&self) -> Option<&Divergence> {
+        self.divergence.as_ref()
+    }
+
+    /// Compare an incoming call with the recorded one at the cursor.
+    fn check_strict(&mut self, name: &str, args: &LuaTable) -> Result<(), String> {
+        if let Some(d) = &self.divergence {
+            return Err(format!("replay diverged at seq {}", d.seq));
+        }
+        let args_canonical = canonical_serialize_table(args)
+            .map_err(|e| format!("replay args encode error: {e:?}"))?;
+        let actual = TapeCall {
+            tool_name: name.to_owned(),
+            args_canonical,
+        };
+        // Past the last entry the tape is exhausted, whatever `calls` holds.
+        let expected = if self.cursor < self.tape.entries.len() {
+            self.tape.calls.get(self.cursor)
+        } else {
+            None
+        };
+        if expected == Some(&actual) {
+            return Ok(());
+        }
+        let seq = self.cursor;
+        self.divergence = Some(Divergence {
+            seq,
+            expected: expected.cloned(),
+            actual,
+        });
+        Err(format!("replay diverged at seq {seq}"))
     }
 
     /// Number of entries remaining on the tape.
@@ -370,7 +470,10 @@ impl TapeHost {
 }
 
 impl HostInterface for TapeHost {
-    fn call_tool(&mut self, _name: &str, _args: &LuaTable) -> Result<LuaTable, String> {
+    fn call_tool(&mut self, name: &str, args: &LuaTable) -> Result<LuaTable, String> {
+        if self.strict {
+            self.check_strict(name, args)?;
+        }
         if self.cursor >= self.tape.entries.len() {
             return Err("oracle tape exhausted".to_owned());
         }
@@ -818,6 +921,166 @@ mod tests {
             .unwrap();
         let k = LuaKey::String(LuaString::from_str("v"));
         assert_eq!(t.get(&k), Some(&LuaValue::Integer(99)));
+    }
+
+    // ── TapeHost::strict ─────────────────────────────────────────────────────
+
+    fn args(key: &str, val: i64) -> LuaTable {
+        let mut t = LuaTable::new();
+        t.rawset(
+            LuaKey::String(LuaString::from_str(key)),
+            LuaValue::Integer(val),
+        )
+        .unwrap();
+        t
+    }
+
+    fn recorded_tape() -> OracleTape {
+        let mut transcript = Transcript::new();
+        transcript.record_ok("price", b"{\"n\":1}".to_vec(), b"{\"v\":7}".to_vec(), 100);
+        OracleTape::from_records(transcript.records())
+    }
+
+    #[test]
+    fn from_records_fills_calls_and_new_tape_has_none() {
+        let tape = recorded_tape();
+        assert_eq!(
+            tape.calls,
+            vec![TapeCall {
+                tool_name: "price".to_owned(),
+                args_canonical: b"{\"n\":1}".to_vec(),
+            }]
+        );
+        assert!(OracleTape::new().calls.is_empty());
+    }
+
+    #[test]
+    fn strict_tape_host_accepts_matching_call() {
+        let mut host = TapeHost::strict(recorded_tape());
+        let t = host.call_tool("price", &args("n", 1)).unwrap();
+        let k = LuaKey::String(LuaString::from_str("v"));
+        assert_eq!(t.get(&k), Some(&LuaValue::Integer(7)));
+        assert!(host.divergence().is_none());
+        assert!(host.is_exhausted());
+    }
+
+    #[test]
+    fn strict_tape_host_rejects_different_tool_name() {
+        let mut host = TapeHost::strict(recorded_tape());
+        let err = host.call_tool("other", &args("n", 1)).unwrap_err();
+        assert_eq!(err, "replay diverged at seq 0");
+        let d = host.divergence().unwrap();
+        assert_eq!(d.seq, 0);
+        assert_eq!(d.expected.as_ref().unwrap().tool_name, "price");
+        assert_eq!(d.actual.tool_name, "other");
+        assert_eq!(d.actual.args_canonical, b"{\"n\":1}");
+    }
+
+    #[test]
+    fn strict_tape_host_rejects_tape_without_call_data() {
+        let mut tape = recorded_tape();
+        tape.calls.clear();
+        let mut host = TapeHost::strict(tape);
+        let err = host.call_tool("price", &args("n", 1)).unwrap_err();
+        assert_eq!(err, "replay diverged at seq 0");
+        assert_eq!(host.divergence().unwrap().expected, None);
+    }
+
+    #[test]
+    fn strict_tape_host_keeps_first_divergence_and_stays_failed() {
+        let mut transcript = Transcript::new();
+        transcript.record_ok("a", b"{}".to_vec(), b"{}".to_vec(), 100);
+        transcript.record_ok("b", b"{}".to_vec(), b"{}".to_vec(), 100);
+        let mut host = TapeHost::strict(OracleTape::from_records(transcript.records()));
+        host.call_tool("a", &empty_args()).unwrap();
+        assert!(host.call_tool("x", &empty_args()).is_err());
+        // A matching call after the divergence still fails, reporting seq 1.
+        let err = host.call_tool("b", &empty_args()).unwrap_err();
+        assert_eq!(err, "replay diverged at seq 1");
+        let d = host.divergence().unwrap();
+        assert_eq!(d.seq, 1);
+        assert_eq!(d.actual.tool_name, "x");
+    }
+
+    #[test]
+    fn non_strict_tape_host_ignores_call_data() {
+        let mut host = TapeHost::new(recorded_tape());
+        host.call_tool("other", &args("n", 2)).unwrap();
+        assert!(host.divergence().is_none());
+    }
+
+    // ── Commitments are independent of call data ─────────────────────────────
+
+    /// A fixed tape with an attested Ok entry and an Err entry. The pinned
+    /// values below were computed before `calls` existed, so they prove the
+    /// field is not committed.
+    fn pinned_tape() -> OracleTape {
+        let mut t = Transcript::new();
+        t.record_ok_attested(
+            "price",
+            b"{\"asset\":\"eth\"}".to_vec(),
+            b"{\"price\":100}".to_vec(),
+            b"sig".to_vec(),
+            128,
+        );
+        t.record_error("transfer", b"{\"amount\":20}".to_vec(), 0, "denied");
+        OracleTape::from_records(t.records())
+    }
+
+    fn hex(bytes: [u8; 32]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn tape_sha256_commitments_pinned_and_ignore_calls() {
+        let with_calls = pinned_tape();
+        let mut without_calls = pinned_tape();
+        without_calls.calls.clear();
+        for tape in [&with_calls, &without_calls] {
+            assert_eq!(
+                hex(tape.commitment_hash_sha256()),
+                "b87bf87c51f7c0a5adba63a0e1f0a1a91bf39eef8e4c56ca5376a7afb7e4ff22"
+            );
+            assert_eq!(
+                hex(tape.attestation_commitment_sha256()),
+                "fdf0ff005939c7ae0e4fc3792adbd9b98fc3e095451d3f8288ca0600f1645476"
+            );
+        }
+    }
+
+    #[cfg(feature = "poseidon")]
+    #[test]
+    fn tape_poseidon_commitments_pinned_and_ignore_calls() {
+        let with_calls = pinned_tape();
+        let mut without_calls = pinned_tape();
+        without_calls.calls.clear();
+        for tape in [&with_calls, &without_calls] {
+            assert_eq!(
+                hex(tape.commitment_hash()),
+                "15b3e357ce3040d5f3c860be2d6a61721383062a6b94bbb63d88ba6c9acd0830"
+            );
+            assert_eq!(
+                hex(tape.attestation_commitment()),
+                "1d6acf3559050670717395f14fbdcea46e5a9e5392896ee92155d06a720d33d0"
+            );
+        }
+    }
+
+    // ── Serde compatibility ──────────────────────────────────────────────────
+
+    /// Tapes serialized before `calls` existed must still load, with no calls.
+    #[cfg(all(feature = "serde", feature = "std"))]
+    #[test]
+    fn tape_without_calls_still_deserializes() {
+        let json = r#"{"entries":[{"Ok":[123,125]},{"Err":"denied"}],"attestations":[[],[]]}"#;
+        let tape: OracleTape = serde_json::from_str(json).unwrap();
+        assert_eq!(tape.entries[0], TapeEntry::Ok(b"{}".to_vec()));
+        assert_eq!(tape.entries[1], TapeEntry::Err("denied".to_owned()));
+        assert!(tape.calls.is_empty());
+
+        let round_trip: OracleTape =
+            serde_json::from_str(&serde_json::to_string(&pinned_tape()).unwrap()).unwrap();
+        assert_eq!(round_trip.calls, pinned_tape().calls);
     }
 
     // ── Transcript → OracleTape round-trip (unit level) ──────────────────────

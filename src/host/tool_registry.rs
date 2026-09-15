@@ -37,6 +37,11 @@ impl<H: HostInterface> ToolRegistry<H> {
         }
     }
 
+    /// The wrapped host, e.g. to read a `TapeHost`'s divergence after a run.
+    pub fn host(&self) -> &H {
+        &self.host
+    }
+
     /// Reset counters for a new execution.
     pub fn reset(&mut self) {
         self.calls_made = 0;
@@ -88,6 +93,13 @@ impl<H: HostInterface> ToolRegistry<H> {
         match result {
             Ok(resp_table) => {
                 // 6a. Serialize response.
+                //
+                // Remaining replay gap: if the host's response cannot be
+                // canonicalised (e.g. table depth exceeded), there are no bytes
+                // to record, so the call is not on the transcript and a strict
+                // replay of the run ends with the tape exhausted instead of
+                // this error. Closing it needs a new tape entry kind, which
+                // would change the tape format and its commitments.
                 let resp_canonical =
                     canonical_serialize_table(&resp_table).map_err(|e| match e {
                         CanonError::TableDepthExceeded => VmError::RuntimeError(LuaValue::String(
@@ -96,25 +108,18 @@ impl<H: HostInterface> ToolRegistry<H> {
                         other => VmError::from(other),
                     })?;
 
-                // 6b. Check bytes-out quota.
-                if self.total_bytes_out + resp_canonical.len() > config.max_tool_bytes_out {
-                    return Err(VmError::RuntimeError(LuaValue::String(
-                        LuaString::from_str("tool output bytes limit exceeded"),
-                    )));
-                }
-
-                // 6c. Update bytes-out counter.
-                self.total_bytes_out += resp_canonical.len();
-
-                // 6d. Charge gas: 100 + args_bytes + resp_bytes.
+                // 6b. Gas: 100 + args_bytes + resp_bytes.
                 let gas_cost = gas_cost::TOOL_CALL_BASE
                     + args_canonical.len() as u64
                     + resp_canonical.len() as u64;
-                gas.charge(gas_cost)?;
+                let resp_len = resp_canonical.len();
 
-                // 6e. Take the host's provenance attestation (if any) for this
-                //     response, then record the transcript. Queried only on the
-                //     committed path so a failed call never consumes it.
+                // 6c. Record the call, with the host's provenance attestation,
+                //     before the bytes-out and gas checks. The host has already
+                //     answered, so a run that fails either check must still
+                //     carry this response: replaying it reaches the same
+                //     failure with the same meters. `gas_charged` is the cost
+                //     attempted, whether or not the charge succeeds.
                 let attestation = self.host.take_attestation().unwrap_or_default();
                 transcript.record_ok_attested(
                     name,
@@ -123,6 +128,17 @@ impl<H: HostInterface> ToolRegistry<H> {
                     attestation,
                     gas_cost,
                 );
+
+                // 6d. Check bytes-out quota.
+                if self.total_bytes_out + resp_len > config.max_tool_bytes_out {
+                    return Err(VmError::RuntimeError(LuaValue::String(
+                        LuaString::from_str("tool output bytes limit exceeded"),
+                    )));
+                }
+                self.total_bytes_out += resp_len;
+
+                // 6e. Charge gas.
+                gas.charge(gas_cost)?;
 
                 // 6f. Return table.
                 Ok(resp_table)
@@ -368,6 +384,34 @@ mod tests {
         if let VmError::RuntimeError(LuaValue::String(s)) = err {
             assert!(String::from_utf8_lossy(s.as_bytes()).contains("output"));
         }
+        // The host answered, so the response is recorded for replay.
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(transcript.records()[0].status, ToolCallStatus::Ok);
+    }
+
+    #[test]
+    fn gas_exhausted_on_tool_charge_still_records_attested_response() {
+        let host = AttestingHost {
+            response: make_response_table(),
+            attestation: b"provider-sig".to_vec(),
+        };
+        let mut registry = ToolRegistry::new(host);
+        let mut gas = GasMeter::new(10);
+        let mut transcript = Transcript::new();
+        let args = make_empty_table();
+
+        let err = registry
+            .call("t", &args, &make_config(), &mut gas, &mut transcript)
+            .unwrap_err();
+        assert_eq!(err, VmError::GasExhausted);
+        assert_eq!(transcript.len(), 1);
+        let r = &transcript.records()[0];
+        assert_eq!(r.status, ToolCallStatus::Ok);
+        assert_eq!(r.attestation, b"provider-sig");
+        assert_eq!(
+            r.gas_charged,
+            gas_cost::TOOL_CALL_BASE + r.args_bytes as u64 + r.response_bytes as u64
+        );
     }
 
     #[test]

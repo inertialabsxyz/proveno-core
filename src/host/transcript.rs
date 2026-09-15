@@ -20,7 +20,9 @@ pub struct ToolCallRecord {
     pub seq: usize,
     /// The tool name string.
     pub tool_name: String,
-    /// Canonical JSON bytes of the serialized arguments.
+    /// Canonical JSON bytes of the serialized arguments. Serializes as a
+    /// string holding the JSON text.
+    #[cfg_attr(feature = "serde", serde(with = "json_text"))]
     pub args_canonical: Vec<u8>,
     /// Byte length of `args_canonical`.
     pub args_bytes: usize,
@@ -29,20 +31,107 @@ pub struct ToolCallRecord {
     /// Byte length of the canonical response bytes (0 on error).
     pub response_bytes: usize,
     /// Canonical JSON bytes of the response table (empty on error).
-    /// Used to construct an `OracleTape` for zkVM replay.
+    /// Used to construct an `OracleTape` for zkVM replay. Serializes as a
+    /// string holding the JSON text.
+    #[cfg_attr(feature = "serde", serde(with = "json_text"))]
     pub response_canonical: Vec<u8>,
     /// Error message returned by the host (empty string on success).
     /// Used to replay `Err(msg)` responses from an `OracleTape`.
     pub error_message: String,
     /// Provenance attestation blob the host sourced for this response (empty
     /// when none). Bind-only: committed alongside the response bytes, not
-    /// verified here. Always empty for failed calls.
-    #[cfg_attr(feature = "serde", serde(default))]
+    /// verified here. Always empty for failed calls. Serializes as lowercase
+    /// hex.
+    #[cfg_attr(feature = "serde", serde(default, with = "lower_hex"))]
     pub attestation: Vec<u8>,
     /// Gas charged for this tool call (0 for failed calls).
     pub gas_charged: u64,
     /// Status of the call.
     pub status: ToolCallStatus,
+}
+
+/// Serde form of canonical JSON bytes: a string holding the JSON text.
+///
+/// Canonical JSON is ASCII (non-ASCII is escaped), so the text is exact. Bytes
+/// that are not UTF-8 are an error rather than a lossy conversion.
+#[cfg(feature = "serde")]
+mod json_text {
+    #[cfg(not(feature = "std"))]
+    use alloc::vec::Vec;
+    use core::fmt;
+    use serde::{Deserializer, Serializer, de, ser};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        let text = core::str::from_utf8(bytes)
+            .map_err(|_| ser::Error::custom("canonical JSON bytes are not valid UTF-8"))?;
+        serializer.serialize_str(text)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        struct Text;
+        impl de::Visitor<'_> for Text {
+            type Value = Vec<u8>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a string holding canonical JSON text")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<u8>, E> {
+                Ok(v.as_bytes().to_vec())
+            }
+        }
+        deserializer.deserialize_str(Text)
+    }
+}
+
+/// Serde form of opaque bytes: a lowercase hex string. Deserializing rejects
+/// anything else, including uppercase digits and odd lengths.
+#[cfg(feature = "serde")]
+mod lower_hex {
+    #[cfg(not(feature = "std"))]
+    use alloc::{string::String, vec::Vec};
+    use core::fmt;
+    use serde::{Deserializer, Serializer, de};
+
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        let mut text = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            text.push(DIGITS[(b >> 4) as usize] as char);
+            text.push(DIGITS[(b & 0x0f) as usize] as char);
+        }
+        serializer.serialize_str(&text)
+    }
+
+    fn nibble(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            _ => None,
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        struct Hex;
+        impl de::Visitor<'_> for Hex {
+            type Value = Vec<u8>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a lowercase hex string")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<u8>, E> {
+                let v = v.as_bytes();
+                if !v.len().is_multiple_of(2) {
+                    return Err(E::custom("hex string has odd length"));
+                }
+                v.chunks(2)
+                    .map(|pair| match (nibble(pair[0]), nibble(pair[1])) {
+                        (Some(hi), Some(lo)) => Ok((hi << 4) | lo),
+                        _ => Err(E::custom("invalid lowercase hex digit")),
+                    })
+                    .collect()
+            }
+        }
+        deserializer.deserialize_str(Hex)
+    }
 }
 
 /// Accumulates tool call records for the current execution.
@@ -255,5 +344,97 @@ mod tests {
         assert_eq!(t.records()[0].status, ToolCallStatus::Ok);
         assert_eq!(t.records()[1].status, ToolCallStatus::Error);
         assert_eq!(t.records()[1].seq, 1);
+    }
+
+    // ── Serde form ────────────────────────────────────────────────────────────
+
+    #[cfg(all(feature = "serde", feature = "std"))]
+    fn attested_record() -> ToolCallRecord {
+        let mut t = Transcript::new();
+        t.record_ok_attested(
+            "transfer",
+            b"{\"amount\":20}".to_vec(),
+            b"{\"ok\":true}".to_vec(),
+            vec![0x00, 0xab, 0xff],
+            113,
+        );
+        t.records()[0].clone()
+    }
+
+    #[cfg(all(feature = "serde", feature = "std"))]
+    const ATTESTED_RECORD_JSON: &str = r#"{"seq":0,"tool_name":"transfer","args_canonical":"{\"amount\":20}","args_bytes":13,"response_hash":"4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93","response_bytes":11,"response_canonical":"{\"ok\":true}","error_message":"","attestation":"00abff","gas_charged":113,"status":"Ok"}"#;
+
+    #[cfg(all(feature = "serde", feature = "std"))]
+    fn assert_same_record(a: &ToolCallRecord, b: &ToolCallRecord) {
+        assert_eq!(a.seq, b.seq);
+        assert_eq!(a.tool_name, b.tool_name);
+        assert_eq!(a.args_canonical, b.args_canonical);
+        assert_eq!(a.args_bytes, b.args_bytes);
+        assert_eq!(a.response_hash, b.response_hash);
+        assert_eq!(a.response_bytes, b.response_bytes);
+        assert_eq!(a.response_canonical, b.response_canonical);
+        assert_eq!(a.error_message, b.error_message);
+        assert_eq!(a.attestation, b.attestation);
+        assert_eq!(a.gas_charged, b.gas_charged);
+        assert_eq!(a.status, b.status);
+    }
+
+    #[cfg(all(feature = "serde", feature = "std"))]
+    #[test]
+    fn record_serializes_bytes_as_json_text_and_hex() {
+        let record = attested_record();
+        let json = serde_json::to_string(&record).unwrap();
+        assert_eq!(json, ATTESTED_RECORD_JSON);
+
+        let back: ToolCallRecord = serde_json::from_str(&json).unwrap();
+        assert_same_record(&back, &record);
+    }
+
+    #[cfg(all(feature = "serde", feature = "std"))]
+    #[test]
+    fn record_with_empty_attestation_round_trips() {
+        let mut t = Transcript::new();
+        t.record_error("fail", b"{}".to_vec(), 0, "denied");
+        let record = t.records()[0].clone();
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains(r#""response_canonical":"""#), "{json}");
+        assert!(json.contains(r#""attestation":"""#), "{json}");
+        let back: ToolCallRecord = serde_json::from_str(&json).unwrap();
+        assert_same_record(&back, &record);
+
+        // A record without the field at all still loads, with no attestation.
+        let without = json.replace(r#","attestation":"""#, "");
+        let back: ToolCallRecord = serde_json::from_str(&without).unwrap();
+        assert!(back.attestation.is_empty());
+    }
+
+    #[cfg(all(feature = "serde", feature = "std"))]
+    #[test]
+    fn record_with_non_utf8_args_fails_to_serialize() {
+        let mut record = attested_record();
+        record.args_canonical = vec![b'"', 0xff, b'"'];
+        let err = serde_json::to_string(&record).unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"), "{err}");
+    }
+
+    #[cfg(all(feature = "serde", feature = "std"))]
+    #[test]
+    fn record_with_bad_hex_attestation_fails_to_deserialize() {
+        // Sanity: the untouched fixture deserializes.
+        serde_json::from_str::<ToolCallRecord>(ATTESTED_RECORD_JSON).unwrap();
+        // The old number-array form is rejected too.
+        for bad in [
+            r#""0g""#,
+            r#""abc""#,
+            r#""00ABFF""#,
+            r#""0x00""#,
+            "[0,171,255]",
+        ] {
+            let json = ATTESTED_RECORD_JSON.replace(r#""00abff""#, bad);
+            assert!(
+                serde_json::from_str::<ToolCallRecord>(&json).is_err(),
+                "accepted attestation {bad}"
+            );
+        }
     }
 }
