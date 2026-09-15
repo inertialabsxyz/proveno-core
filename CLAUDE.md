@@ -1,6 +1,25 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in **proveno-core**.
+
+## What this repository is
+
+The proveno runtime, and nothing else: parser, compiler, bytecode verifier, VM,
+host, ISA, and the record/replay machinery. It is `no_std`-capable and knows
+nothing about policy, HTTP, X.509, Ethereum or LLMs.
+
+If a change touches proving, policy or provenance, it does not belong here.
+
+| Repository | Scope |
+|---|---|
+| **proveno-core** (here) | Runtime: parser, compiler, bytecode, types, vm, host, isa |
+| [proveno-zk](https://github.com/inertialabsxyz/proveno-zk) | Policy, commitments, Noir circuit, OpenVM guest, contracts |
+| [proveno-agent](https://github.com/inertialabsxyz/proveno-agent) | LLM orchestrator, demo server, TLS provenance |
+| [proveno](https://github.com/inertialabsxyz/proveno) | Umbrella: project overview, architecture, trust model |
+
+Dependencies point inward, by git tag. Nothing here may depend on the other
+three. The [architecture document](https://github.com/inertialabsxyz/proveno/blob/main/docs/architecture.md)
+in the umbrella is the tie-breaker when documents disagree.
 
 ## Quality Gate
 
@@ -8,343 +27,160 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 make check
 ```
 
-Must pass before every commit. Runs `lint` (fmt + clippy `-D warnings`), `test`,
-`test-tls` and `test-nostd` across all workspace members.
+Must pass before every commit. Runs `lint` (fmt + clippy `-D warnings`), `test`
+and `test-nostd`.
 
-`cargo test` alone is acceptable while iterating, but it does **not** cover
-`tests/tls.rs` (the `tls` feature is off by default) or the `no_std` /
-no-poseidon guest configurations, both of which `make check` does.
+`cargo test` alone is acceptable while iterating, but it does not cover the
+`no_std` / no-poseidon configurations that `test-nostd` builds, and those are
+what the zkVM guest compiles against.
 
 Note `make lint` runs plain `cargo clippy`, not `--all-targets`, so lints inside
 `tests/*.rs` are not gated.
 
-### Pre-PR gate
-
-Before opening a PR, also run:
-
-```bash
-make test-prove
-```
-
-This drives the full nargo+bb prove/verify pipeline via `proveno-noir/tests/prove.rs` (which is **not** picked up by plain `cargo test` from the root). It prints prove/verify wall-time per test so circuit-size / prove-time regressions are visible. Slow (~20 s) and requires `nargo` and `bb` on `PATH`.
+There is no `test-prove` here. The Noir prove/verify pipeline lives in
+proveno-zk; run it there for any change to the compiler, the ISA, canonical
+serialization or the oracle tape, because those are what the circuit recomputes.
 
 ## Common Commands
 
 ```bash
-# Build
-cargo build                          # debug, all workspace members
-cargo build -p proveno                  # core library only
-
-# Test
+cargo build                          # debug
 cargo test                           # all tests
 cargo test --lib                     # unit tests only (fast)
-cargo test --test integration        # one integration file (also: builtins, compiler, json, tools, policy, isa_trace)
 cargo test --lib engine              # filter by name within unit tests
+cargo test --test integration        # one integration file
+                                     # (also: builtins, compiler, json, tools, isa_trace)
 
-# Feature-gated builds
-cargo build --features zkvm          # enable zkvm module
-cargo test --features "serde zkvm"   # test with serde + zkvm features
-
-# Run CLI tools
 cargo run -p proveno-compiler -- source.lua compiled.json
-cargo run -p proveno-witness   -- compiled.json dry_result.json
-cargo run -p proveno-orchestrator -- "natural language task"
+cargo run --example repl -- source.lua     # smoke-test REPL with a toy host
 
-# Noir prove/verify benchmark (drives the full nargo+bb pipeline; prints prove/verify wall time)
-# Requires `nargo` and `bb` on PATH.
-cargo test -p proveno-noir --test prove end_to_end_prove_and_verify -- --nocapture
+make test-nostd                      # the no_std / no-poseidon configurations
 ```
 
-There is no separate lint command; `cargo test` exercises the full suite including doc-tests. `cargo clippy` is not currently part of the gate.
+## Features
 
-## Workspace Layout
-
-| Crate | Role |
-|---|---|
-| `proveno` (root) | Core library: parser, compiler, bytecode, VM, host |
-| `proveno-compiler` | CLI: compiles Lua source → verified bytecode JSON |
-| `proveno-witness` | CLI: dry-runs bytecode, produces oracle tape + public inputs |
-| `proveno-orchestrator` | LLM-driven agent loop (Claude API + live tool execution; `--prove` runs the full Noir pipeline) |
-| `proveno-noir` | Noir witness writer + `nargo`/`bb` prover driver (canonical proving path) |
-| `proveno-verifier` | Small helper binaries (e.g. `policy-hash` prints the canonical policy commitment) |
-| `proveno-openvm` | OpenVM zkVM guest (RISC-V): replays a program and reveals the public-inputs digest |
-| `proveno-openvm-host` | Host driver for the OpenVM backend: builds guest input, drives prove/verify |
-
-Core library features: `default = ["std", "poseidon"]`, optional `serde`, `zkvm`, `tls`.
-
-`poseidon` is in the default set deliberately: `compiler::codegen` selects the
-program-hash scheme on it, so dropping it silently switches every committed
-`program_hash` from Poseidon2 to SHA-256. Pinned by
-`poseidon_hash_matches_recorded_fixture` in `src/compiler/program_hash.rs`.
-`tls` is opt-in (`make test-tls`); it is one provenance provider, not runtime.
+`default = ["std", "poseidon"]`, plus optional `serde`.
 
 | Feature | Role |
 |---|---|
-| `std` | Standard library. Off = `no_std` + `alloc`. Also gates `policy` (needs `serde_json`) |
-| `poseidon` | BN254 Poseidon2 commitments, byte-identical to the Noir circuit |
-| `tls` | TLS attestation producer (cert-chain verification). Implies `poseidon` |
-| `zkvm` | `PublicInputs` and the commitment helpers |
+| `std` | Standard library. Off = `no_std` + `alloc`. |
+| `poseidon` | BN254 Poseidon2, byte-identical to the Noir circuit. |
+| `serde` | Serialization of `CompiledProgram`, `VmOutput`, `OracleTape`. |
 
-**`poseidon` must be off for zkVM guest builds.** It pulls `bn254_blackbox_solver`
-→ wasmer → cranelift → target-lexicon 0.12, whose build script hard-panics on
-custom RISC-V target triples, and cargo runs that build script whether or not
-the code is ever linked. Without it the dependency tree drops from 523 entries
-to 22.
+**`poseidon` must stay in the default set.** `compiler::codegen` selects the
+program-hash scheme on it, so removing it would silently switch every committed
+`program_hash` from Poseidon2 to SHA-256, with no compile error. Pinned by
+`poseidon_hash_matches_recorded_fixture` in `src/compiler/program_hash.rs`.
 
-### Two commitment schemes
+**`poseidon` must be off for zkVM guest builds.** It pulls
+`bn254_blackbox_solver` → wasmer → cranelift → target-lexicon, whose build
+script hard-panics on custom RISC-V target triples, and cargo runs that build
+script whether or not the code is linked. The tree goes from 245 crates to 22.
 
-`program_hash`, `tool_responses_hash`, and `attestation_hash` are
-**backend-specific**. `input_hash` (SHA-256) and `output_hash` (keccak256) are
-not — they are fixed by their consumers.
+## Resource limits
 
-| Backend | Scheme | Constructor |
+`VmConfig::default()`, in `src/vm/engine.rs`:
+
+| Limit | Field | Default |
 |---|---|---|
-| Noir / UltraHonk | Poseidon2 | `compute_public_inputs` |
-| zkVM (OpenVM) | SHA-256 | `compute_public_inputs_sha256` |
+| Gas | `gas_limit` | 200,000 |
+| Memory | `memory_limit_bytes` | 16 MiB |
+| Call depth | `max_call_depth` | 64 |
+| Tool calls | `max_tool_calls` | 16 |
+| Bytes in, all calls | `max_tool_bytes_in` | 64 KiB |
+| Bytes out, all calls | `max_tool_bytes_out` | 1 MiB |
+| Return value size | `max_output_bytes` | 256 KiB |
 
-Poseidon2 is right inside a circuit, where BN254 is native and SHA-256 costs
-~25k constraints per block. In a RISC-V zkVM the cost model inverts: one
-Poseidon2 permutation is 488 software 254-bit modmuls absorbing 3 bytes (rate 3,
-byte-per-field), against one accelerated instruction per 64-byte block for
-SHA-256. The two are **not interchangeable** — a verifier must recompute with
-the scheme the prover used.
+Constants, not configurable:
 
-## Resource limits (defaults)
+| Limit | Where | Value |
+|---|---|---|
+| String length | `builtins::MAX_STRING_LEN` | 64 KiB |
+| String length, canonical JSON | `canonicalize::MAX_STRING_LEN` | 1 MiB |
+| Table nesting depth | `MAX_TABLE_DEPTH` (both) | 32 |
+| Table entries | `types::value::MAX_TABLE_ENTRIES` | 50,000 |
 
-| Limit | Default |
-|---|---|
-| Gas | 10,000,000 |
-| Memory | 64 MB |
-| Call depth | 200 |
-| Tool calls | 64 |
-| Bytes in per call | 1 MB |
-| Bytes out per call | 64 KB |
-| JSON / string length | 64 KB |
-| Table / call nesting depth | 32 |
+The byte quotas are cumulative across all tool calls in a run, not per call.
 
-## Available tools (orchestrator)
+> Every number in this table was wrong in the pre-split CLAUDE.md, with
+> bytes-in and bytes-out additionally transposed. Check `VmConfig::default()`
+> before trusting a restatement of it.
 
-Programs invoke tools via `tool.call(name, args)`:
-
-| Tool | Description |
-|---|---|
-| `http_get` | GET a URL → `{status, body}` |
-| `http_post` | POST JSON to a URL → `{status, body}` |
-| `kv_get` | Read from in-memory key-value store |
-| `kv_set` | Write to in-memory key-value store |
-| `llm_query` | Sub-query the LLM for fuzzy reasoning |
-| `time_now` | Current Unix timestamp |
-
-## Proving pipeline
-
-Canonical Noir-only flow, end-to-end. Steps 1–3 are also driven in one shot by
-the orchestrator's `--prove` flag; step 4 lives in `demo-noir-e2e.sh` (and its
-local-anvil wrapper `demo-noir-e2e-local.sh`).
-
-```bash
-# 1. Compile Lua source -> verified bytecode JSON
-cargo run -p proveno-compiler -- source.lua compiled.json
-
-# 2. Dry-run with the live host -> oracle tape + public inputs
-cargo run -p proveno-witness -- compiled.json dry_result.json
-
-# 3. Generate the Noir UltraHonk proof
-cargo run -p proveno-noir -- compiled.json dry_result.json --prove
-
-# 1+2+3 in one shot: proveno-orchestrator --prove also invokes proveno-noir and prints the
-# proof bytes + canonical bytes32[] public inputs ready for on-chain submission.
-cargo run -p proveno-orchestrator -- "<task>" --prove
-
-# 4. Submit on chain to ProvenoConsumer.consumeResult (or ProvenoVerifier.verify).
-#    The demo script handles the full LLM -> proof -> chain flow locally.
-ANTHROPIC_API_KEY=… bash demo-noir-e2e-local.sh "<task>"
-```
-
-Public inputs (8, in circuit-declaration order): `num_steps`, `program_hash`,
-`return_value`, `tool_responses_hash`, `input_hash`, `output_hash`,
-`attestation_hash`, `policy_hash`. The Solidity `PublicInputs` struct in
-`contracts/src/Types.sol` mirrors this ordering exactly; reordering breaks
-verification.
-
-## OpenVM proving pipeline
-
-An alternative backend to the Noir path, committing with SHA-256 instead of
-Poseidon2. Requires `cargo-openvm`; proving keys are generated on first use and
-cached in `openvm/` (gitignored).
-
-```bash
-./prove-openvm.sh myscript.lua            # app STARK
-./prove-openvm.sh myscript.lua --stark    # aggregated (recursive) STARK
-```
-
-That is compile → dry run → guest input → prove → verify in one command, leaving
-every artifact under `target/openvm/<name>.*`. The individual steps, if you need
-them:
-
-```bash
-cargo openvm keygen --app-only        # app level; drop the flag for --stark
-cargo run -p proveno-compiler -- source.lua compiled.json
-cargo run -p proveno-witness  -- compiled.json dry_result.json
-cargo run -p proveno-openvm-host -- compiled.json dry_result.json --prove [--stark]
-```
-
-`make prove-openvm` runs the whole thing on `examples/simple.lua`;
-`make prove-examples` runs every `examples/*.lua` and reports which stage each
-one reaches. All 8 currently compile, dry-run, replay, prove and verify. Several
-make live HTTP calls, so that target needs network.
-
-### Execution policy
-
-An `OraclePolicy` constrains what an execution may do (domain allowlist, HTTP
-method restriction, tool-call and payload limits, response schemas). Supply one
-as a built-in profile name or a JSON file:
-
-```bash
-./prove-openvm.sh myscript.lua --policy policies/test-policy.json
-cargo run -p proveno-witness -- compiled.json dry.json --policy constrained_http_v1
-```
-
-`--policy` goes to **both** the dry run, which enforces it, and the guest input,
-which commits its hash. `prove-openvm.sh` passes it to both so they cannot
-drift; the two CLIs must be given the same value by hand.
-
-Omitted list fields mean *unrestricted*, not *denied*, so a sparse policy file is
-wider than a full one.
-
-**What the proof attests.** The guest receives the policy's `canonical_bytes`,
-SHA-256s them itself for `policy_hash`, and **enforces them during replay**. A
-run that violates the policy cannot be replayed, so no proof of it exists. This
-holds even if the host skipped enforcement during the dry run: attaching the
-policy at proving time re-checks the program's own tool calls, because the
-program computes its arguments inside the guest.
-
-| Check | Where |
-|---|---|
-| HTTP method restriction | in-guest, proven |
-| Domain allowlist | in-guest, proven |
-| `max_tool_calls` | in-guest, proven (rejected calls count, so probing is not free) |
-| `max_payload_bytes_per_call` | in-guest, checked against the tape before replay |
-| `required_output_schema`, `schema_versions` | **host-side only**, bind-only |
-
-JSON schema validation stays on the host because it needs `serde_json`. That
-part remains a `policy_hash` commitment with no in-proof enforcement, the same
-boundary as `attestation_hash`.
-
-The guest parses the enforceable fields out of the same bytes it hashes
-(`policy::canonical::PolicyView`), so the policy enforced and the policy
-committed are one document by construction. Corrupt bytes are refused outright
-rather than partially applied, since a partially applied policy is
-indistinguishable from a weaker one.
-
-What a proof still cannot tell you is whether a response genuinely came from the
-domain the program requested. That is provenance, delegated to an attestation
-provider.
-
-### LLM-driven tasks
-
-The orchestrator generates a Lua program from a natural-language task, runs it,
-and can prove the result with either backend:
-
-```bash
-cargo run -p proveno-orchestrator -- "<task>" \
-    --policy policies/test-policy.json \
-    --prove --backend openvm --openvm-level app
-```
-
-`--backend` is `noir` (default) or `openvm`; `--openvm-level` is `app` or
-`stark`. A policy violation surfaces as a runtime error inside the retry loop,
-so the LLM gets a chance to regenerate a compliant program.
-
-Needs `ANTHROPIC_API_KEY`. Note that an exported-but-empty `ANTHROPIC_API_KEY`
-shadows the value in `.env`, because dotenv does not override variables already
-set; the orchestrator detects this and says so rather than failing with a 401.
-
-### Proof levels
-
-| level | what it is |
-|---|---|
-| `app` | the application STARK (default) |
-| `stark` | app segments aggregated recursively into one root STARK (`--stark`) |
-| `evm` | Halo2 SNARK wrapper for on-chain verification (not wired up) |
-
-Baseline timings and scaling fits are in `examples/bench/RESULTS.md`.
-
-The guest reads a `GuestInput`, replays the program against a `TapeHost`, and
-reveals a single 32-byte digest over the six public inputs
-(`PublicInputs::digest_sha256`) rather than all 192 bytes: OpenVM's default
-public-values budget is 32 bytes and each public value costs proving work. The
-verifier gets the six values out of band and recomputes the digest.
-
-Host and guest share one definition of the proven computation,
-`GuestInput::replay_public_inputs`. The driver runs it before proving, so a
-host/guest divergence surfaces as an error rather than as a proof revealing an
-unexpected digest.
-
-**What the proof does not bind:** `VmConfig`. The prover chooses the gas and
-memory limits, which determine whether execution completes or aborts.
-
-### Known gap: the Poseidon2 program hash does not cover constants
-
-`compute_program_hash` (the Noir path) hashes only the `(opcode, operand)`
-instruction stream. `PushK`, `GetField` and `SetField` carry a constant-pool
-*index*, so `return 1`, `return 2` and `return "omega"` all compile to the same
-stream and hash identically. A prover can swap every literal in a program and
-still match a committed `program_hash`.
-
-`compute_program_hash_sha256` (the OpenVM path) does not have this gap: it
-covers the constant pool, upvalue descriptors and prototype metadata. Closing it
-on the Noir side means changing `assert_bytecode` in `noir/src/main.nr` in
-lockstep, which invalidates existing verification keys.
-
-The gap is open and **not** pinned by a test. Earlier revisions of this file
-claimed a `poseidon_program_hash_does_not_cover_constants_known_gap` test in
-`src/noir/encoder.rs`; no such test has ever existed in the tree.
-
-## Architecture
-
-Proveno runs **verifiable tasks**: small programs (often LLM-authored) written in plain Lua. A task is compiled to bytecode and executed inside a deterministic, sandboxed, bounded interpreter; a ZK proof attests that this exact program ran over these exact inputs and produced this exact output, and a verifier — off-chain, or a smart contract on-chain — checks it before acting on the result. All tool calls are recorded in a cryptographic transcript that can be replayed for proof generation.
-
-A verifiable task proves two things side by side, in one proof: **execution** (always — the program ran exactly as written over exactly these inputs) and **provenance** (when a provider is attached — the inputs were authentic; proveno *binds* the attestation, the provider *produces* it; see the boundary below).
-
-The identity is horizontal — verifiable tasks are useful wherever a result must be trusted. On-chain verification (a contract acting on a task's proof, coprocessor-style) is its first high-value **application**, not its category. Proveno is **not an oracle**: it *touches* the oracle world by consuming attested inputs, but "oracle" promises data provenance, which is the provider's job, not proveno's. The zkVM is the proving **mechanism**, not the identity; the Noir backend could retarget without changing what proveno is.
-
-The proof guarantees **computation integrity** (the program ran correctly over the inputs it was given), not **data provenance** (that those inputs are authentic data from the real source). Provenance is **delegated, not built**: the `attestation_hash` public input *binds* (does not verify) a per-call provider attestation to the response bytes it covers, via `OracleTape::attestation_commitment`; a provider plugs in at `HostInterface::take_attestation`. Concrete providers (Pyth signatures, zkTLS networks) are follow-on work. Keep this boundary honest in docs and code comments — the circuit binds blobs, it does not authenticate them.
-
-### Execution pipeline
+## Execution pipeline
 
 ```
 Lua source
     → parser/          (lexer + recursive-descent → AST)
     → compiler/        (AST → register-based bytecode + constants + program hash)
-    → isa/             (opcode numbering + TraceStep; the VM's own encoding)
+    → isa/             (opcode numbering + TraceStep: the VM's own encoding)
     → bytecode/verifier.rs  (validates stack depth, branch targets)
     → vm/engine.rs     (instruction dispatch loop, gas + memory metering)
     → host/            (tool calls, transcript, oracle tape)
 ```
 
-### Key modules in `src/`
+## Key modules in `src/`
 
-- **`parser/`** — Lexer and recursive-descent parser. Disallows `require`, `os`, `io`, and other unsafe constructs at parse time. `tool.call()` is a first-class syntax node.
-- **`compiler/`** — `codegen.rs` compiles AST to `Instruction` bytecode. `proto.rs` defines `FunctionProto`, `Instruction`, `Constant`. `mod.rs` exposes `compile()`. `program_hash.rs` is the canonical definition of the program hash, in both the Poseidon2 and SHA-256 schemes.
-- **`isa/`** — The VM's instruction encoding: `opcodes.rs` (opcode IDs) and `trace.rs` (`TraceStep`). Not a prover concern, despite the Noir circuit being the first consumer.
-- **`bytecode/`** — `Instruction` enum and `verifier.rs`. The verifier performs a single-pass stack-depth check across all control-flow paths before any instruction executes.
-- **`vm/engine.rs`** — `Vm` struct and the main execution loop. Manages `CallFrame` stack, resolves builtins from sentinel strings, dispatches `ToolCall` through `ToolRegistry`.
-- **`vm/builtins.rs`** — All standard library functions (`string.*`, `math.*`, `table.*`, `json.*`, `pcall`, `type`, `pairs_sorted`, `ipairs`, `log`, `print`).
-- **`vm/gas.rs` + `vm/memory.rs`** — `GasMeter` and `MemoryMeter`; all allocations and instructions are charged. Exhaustion raises `VmError`.
-- **`types/value.rs`** — `LuaValue` enum (`Nil | Boolean | Integer | LuaString | Table | Closure | Builtin`). No floats — integers only.
-- **`types/table.rs`** — `LuaTable` with integer array section and string/integer hash section. `rawset_tracked()` returns `RawsetResult` for memory accounting.
-- **`host/`** — `ToolRegistry<H>` wraps a `HostInterface`, enforces per-call quotas, records a `Transcript`. `OracleTape` / `TapeHost` enable deterministic replay. `canonical_serialize()` produces byte-for-byte reproducible JSON for hashing. Knows nothing about `policy`.
-- **`policy/`** — `OraclePolicy` plus two enforcing host wrappers: `OraclePolicyHost` (std, adds response-schema checks) and `guest::PolicyEnforcingHost` (`no_std`, what the zkVM guest runs). Enforcement is a host wrapper, not a `ToolRegistry` feature, so a denial is recorded in the transcript and raised as `VmError::ToolError`, which `pcall` can catch.
-- **`noir/`** — `encoder.rs` only: the fixed-size bytecode ABI the circuit expects. `MAX_BYTECODE` must match `global MAX_BYTECODE` in `noir/src/main.nr`.
-- **`zkvm/`** — `PublicInputs`, `GuestInput`, SHA-256 commitment helpers (feature-gated on `zkvm`).
+- **`parser/`** — Lexer and recursive-descent parser. Rejects `require`, `os`,
+  `io` and other unsafe constructs at parse time. `tool.call()` is a first-class
+  syntax node; indirect use is a compile error.
+- **`compiler/`** — `codegen.rs` compiles AST to `Instruction` bytecode.
+  `proto.rs` defines `FunctionProto`, `Instruction`, `Constant`.
+  `program_hash.rs` is the canonical definition of the program hash, in both the
+  Poseidon2 and SHA-256 schemes.
+- **`isa/`** — `opcodes.rs` (opcode IDs) and `trace.rs` (`TraceStep`). The VM's
+  instruction encoding, not a prover concern, despite the Noir circuit being its
+  first consumer.
+- **`bytecode/`** — `verifier.rs` performs a single-pass stack-depth check
+  across all control-flow paths before any instruction executes.
+- **`vm/engine.rs`** — `Vm` and the dispatch loop. Owns the `CallFrame` stack,
+  resolves builtins, dispatches `ToolCall` through `ToolRegistry`.
+- **`vm/builtins.rs`** — the standard library (`string.*`, `math.*`, `table.*`,
+  `json.*`, `pcall`, `type`, `pairs_sorted`, `ipairs`, `log`, `print`).
+- **`vm/gas.rs` + `vm/memory.rs`** — `GasMeter` and `MemoryMeter`. Exhaustion
+  raises `VmError`, never panics.
+- **`types/value.rs`** — `LuaValue` (`Nil | Boolean | Integer | LuaString |
+  Table | Closure | Builtin`). No floats.
+- **`types/table.rs`** — integer array section plus string/integer hash section.
+  `rawset_tracked()` returns `RawsetResult` for memory accounting.
+- **`host/`** — `ToolRegistry<H>` enforces per-call quotas and records a
+  `Transcript`. `OracleTape` / `TapeHost` enable deterministic replay.
+  `canonical_serialize()` is the one reproducible JSON encoding.
+  **Knows nothing about policy**: enforcement is a host wrapper, supplied by
+  proveno-zk.
 
-### Calling convention (important for compiler + VM work)
+## Calling convention (important for compiler + VM work)
 
-- Parameters occupy local slots `0..param_count`. Register them with `register_param()`, not `declare_local()`.
+- Parameters occupy local slots `0..param_count`. Register them with
+  `register_param()`, not `declare_local()`.
 - Non-parameter locals start at slot `param_count` via `declare_local()`.
-- The verifier expects operand-stack depth = 0 at function entry (params are in slots, not on the operand stack).
-- Jump offsets are relative to the instruction **after** the jump (`pc` has already incremented when `jump_by()` is called).
+- The verifier expects operand-stack depth 0 at function entry: params are in
+  slots, not on the operand stack.
+- Jump offsets are relative to the instruction **after** the jump; `pc` has
+  already incremented when `jump_by()` is called.
 
-### Determinism invariants
+## Determinism invariants
 
-No floats, no randomized hash iteration, no time-dependent calls. `pairs_sorted` / `IterInitSorted` iterate tables in canonical key order. `canonical_serialize()` is the single JSON encoding path used for hashing. These constraints are load-bearing for ZK proof soundness — do not introduce non-determinism.
+No floats. No randomized hash iteration. No time-dependent calls.
+`pairs_sorted` / `IterInitSorted` iterate in canonical key order.
+`canonical_serialize()` is the single JSON encoding path used for hashing.
+
+These are load-bearing for ZK proof soundness, not style preferences. Any change
+to the VM, compiler, host serialization or oracle tape **must** include a test
+pinning the property it affects: identical hashes on replay, byte-identical
+canonical JSON, sorted iteration order.
+
+## Known gap: the Poseidon2 program hash does not cover constants
+
+`compute_program_hash` hashes only the `(opcode, operand)` stream. `PushK`,
+`GetField` and `SetField` carry a constant-pool *index*, so `return 1`,
+`return 2` and `return "omega"` hash identically. A prover can swap every
+literal in a program and still match a committed `program_hash`.
+
+`compute_program_hash_sha256` does not have this gap: it covers the constant
+pool, upvalue descriptors and prototype metadata. Closing it on the Noir side
+means changing `assert_bytecode` in proveno-zk's `noir/src/main.nr` in lockstep,
+which invalidates existing verification keys.
+
+The gap is open and **not** pinned by a test. Earlier revisions of this file
+claimed a `poseidon_program_hash_does_not_cover_constants_known_gap` test; it
+has never existed.
