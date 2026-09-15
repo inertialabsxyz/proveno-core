@@ -41,7 +41,7 @@ informally drawn for a while; this makes it structural.
 ```
 proveno            (core)    VM runtime, determinism, record/replay. no_std capable.
   ├── proveno-zk   (app)     Proving: Noir circuit + driver, OpenVM guest + host,
-  │     └── proveno-oracle   commitments, execution policy, Solidity contracts.
+  │     └── proveno-agent   commitments, execution policy, Solidity contracts.
   │                (app)     The oracle product: LLM orchestrator, demo server,
   │                          TLS attestation, examples, benchmarks.
   └── proveno-mcp  (app)     The agent-execution prototype. Depends on core only.
@@ -273,7 +273,7 @@ multi-directory sets), so blame survives in each repository.
    `proveno-noir`, `proveno-openvm`, `proveno-openvm-host`, `verifier`, `noir/`,
    `contracts/`, `openvm.toml`, `tests/policy.rs`. Gate is `cargo test` plus
    `make test-prove`.
-3. **`proveno-oracle`** takes `tls/`, `proveno-orchestrator`, `proveno-demo`,
+3. **`proveno-agent`** takes `tls/`, `proveno-orchestrator`, `proveno-demo`,
    `examples/*.lua` (oracle ones), `bench/`, `scripts/`, `policies/`, `demo-*.sh`,
    `planning/`, `tests/tls.rs`.
 
@@ -325,7 +325,7 @@ make check                                    # must pass with zero network acce
 cargo test && make test-prove
 ./prove-openvm.sh examples/simple.lua
 
-# proveno-oracle
+# proveno-agent
 cargo test
 ANTHROPIC_API_KEY=... bash demo-noir-e2e-local.sh "<task>"
 ```
