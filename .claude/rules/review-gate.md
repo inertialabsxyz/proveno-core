@@ -29,13 +29,13 @@ against its source requirements, fix any gaps, and commit the fixes.
 <one-sentence summary of the feature/fix>
 
 ## Requirements source
-Read the requirements from: planning/programmable-oracle-mvp-plan.md, section "<Phase N — Section Name>"
+Read the requirements from: <the issue, PR description, or planning doc that specified this work>
 
 ## Files changed
 <list the changed files, e.g. src/policy/mod.rs, src/host/tool_registry.rs>
 
 ## Your task
-1. Read the requirements section in planning/programmable-oracle-mvp-plan.md
+1. Read the requirements source named above
 2. Read each changed file
 3. For every requirement in that section, verify it is fully implemented
 4. For any gap found: fix it, then run `cargo test` to confirm it passes

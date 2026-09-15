@@ -1,6 +1,6 @@
 # Commits
 
-**Gate:** `cargo test` must pass before every commit. No exceptions.
+**Gate:** `make check` must pass before every commit. No exceptions.
 
 **Auto-commit:** Commit each logical change as it is completed, without waiting to be asked. Use judgment to determine when a change is coherent and complete — do not commit mid-feature or bundle unrelated changes.
 

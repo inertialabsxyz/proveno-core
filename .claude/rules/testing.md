@@ -10,14 +10,13 @@ make test-unit         # cargo test --lib  (in-module unit tests)
 make test-integration  # cargo test --tests  (tests/*.rs integration files)
 make test-tls          # TLS attestation tests (tls is not a default feature)
 make test-nostd        # no_std / no-poseidon builds (zkVM guest feature configurations)
-make test-prove        # Noir nargo+bb pipeline (pre-PR gate; slow, prints prove/verify times)
 make build-openvm      # build + transpile the OpenVM guest (needs cargo-openvm)
 make fix               # auto-format + apply safe clippy fixes
 ```
 
 `make check` is the hard pre-commit gate (it runs `lint`, `test`, `test-tls` and `test-nostd`). Run it before every commit. If it fails, fix before continuing.
 
-`make test-prove` is the **pre-PR** gate. It is not part of `make check` because it takes ~20 s and requires `nargo` + `bb` on `PATH`, but it must pass before opening a PR — especially for any change touching the Noir circuit (`noir/`), witness writer (`proveno-noir/`), oracle tape, canonical serialization, or program/trace encoders. It prints prove/verify wall-time per test so regressions in circuit size or prove time are visible from the test output.
+`make test-prove` lives in proveno-zk, not here. Run it there for any change touching the oracle tape, canonical serialization, or the program and trace encoders, because the circuit recomputes what this repository produces.
 
 Plain `cargo test` (the gate documented in `CLAUDE.md`) runs the same suite as `make test` and is acceptable when you only need the test pass; use `make check` when committing.
 

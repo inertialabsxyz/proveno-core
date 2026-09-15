@@ -1,13 +1,13 @@
 # Pull Requests
 
-When all commits on a branch are done, `make check` passes, `make test-prove` passes, and the review agent has reported back, push and open a PR automatically.
+When all commits on a branch are done, `make check` passes, and the review agent has reported back, push and open a PR automatically.
 
-`make test-prove` is the pre-PR gate that runs the Noir nargo+bb prove/verify pipeline (`proveno-noir/tests/prove.rs`). It is not included in `make check` because of its ~20 s runtime and `nargo` + `bb` toolchain requirement, but it must pass before opening a PR. Each test prints prove and verify wall-time; capture the numbers in the PR body when the change is expected to move them (e.g. circuit-bound tuning, encoder changes).
+There is no `make test-prove` in this repository; it lives in proveno-zk. If a change affects what gets proved — the program hash, canonical serialization, the oracle tape — run it in a proveno-zk checkout before opening a PR, and note the result in the PR body.
 
 - **Target:** always `main`
 - **State:** always open as **draft**
 - **Title:** `type(scope): short description` — same convention as the commit that drove the work (see `.claude/rules/commits.md`)
-- **Body:** summarise what changed (bullet points from the commits) and reference the relevant planning doc phase (e.g. _Implements Phase 1 — Proof Integrity, `planning/programmable-oracle-mvp-plan.md`_)
+- **Body:** summarise what changed (bullet points from the commits) and reference the issue or planning doc the work came from
 
 ```bash
 git push -u origin <branch>
