@@ -57,11 +57,24 @@ fn response(key: &str, val: i64) -> LuaTable {
     t
 }
 
+/// A response whose canonical form is about 4 KiB, so its tool call costs far
+/// more gas and bytes-out than anything else these programs do.
+fn blob_response() -> LuaTable {
+    let mut t = LuaTable::new();
+    t.rawset(
+        LuaKey::String(LuaString::from_str("data")),
+        LuaValue::String(LuaString::from_str(&"x".repeat(4_000))),
+    )
+    .unwrap();
+    t
+}
+
 fn host() -> NamedHost {
     NamedHost {
         responses: vec![
             ("price", Ok(response("price", 100))),
             ("transfer", Err("denied: amount over limit".to_owned())),
+            ("blob", Ok(blob_response())),
         ],
     }
 }
@@ -77,7 +90,7 @@ fn accessors_match_output_after_successful_run() {
     assert_eq!(vm.transcript()[0].args_canonical, br#"{"asset":"eth"}"#);
     assert_eq!(vm.gas_used(), out.gas_used);
     assert_eq!(vm.memory_used(), out.memory_used);
-    assert_eq!(vm.host().responses.len(), 2);
+    assert_eq!(vm.host().responses.len(), 3);
 }
 
 #[test]
@@ -259,6 +272,66 @@ fn strict_replay_of_gas_exhausted_run_ends_in_same_error() {
     assert_eq!(strip_line(replayed.unwrap_err()), VmError::GasExhausted);
     assert!(vm.host().divergence().is_none());
     assert_eq!(vm.transcript().len(), 1);
+    assert_eq!(vm.gas_used(), rec_vm.gas_used());
+    assert_eq!(vm.memory_used(), rec_vm.memory_used());
+}
+
+const BLOB_CALL: &str = r#"
+    local p = tool.call("price", {asset = "eth"})
+    local b = tool.call("blob", {})
+    return p.price
+"#;
+
+/// Gas runs out on the blob call's own charge, after the host has answered.
+/// The call must still be on the transcript so the replay reaches the same
+/// failure instead of running off the end of the tape.
+#[test]
+fn strict_replay_of_gas_exhausted_on_tool_charge_ends_in_same_error() {
+    let config = VmConfig {
+        gas_limit: 2_000,
+        ..VmConfig::default()
+    };
+    let (recorded, rec_vm) = record(BLOB_CALL, config.clone());
+    assert_eq!(strip_line(recorded.unwrap_err()), VmError::GasExhausted);
+    assert_eq!(rec_vm.transcript().len(), 2);
+    let blob = &rec_vm.transcript()[1];
+    assert_eq!(blob.tool_name, "blob");
+    assert_eq!(blob.status, ToolCallStatus::Ok);
+    assert_eq!(
+        blob.gas_charged,
+        100 + blob.args_canonical.len() as u64 + blob.response_canonical.len() as u64
+    );
+
+    let (replayed, vm) = strict_replay(BLOB_CALL, &rec_vm, config);
+    assert_eq!(strip_line(replayed.unwrap_err()), VmError::GasExhausted);
+    assert!(vm.host().divergence().is_none());
+    assert!(vm.host().is_exhausted());
+    assert_eq!(vm.transcript().len(), 2);
+    assert_eq!(vm.gas_used(), rec_vm.gas_used());
+    assert_eq!(vm.memory_used(), rec_vm.memory_used());
+}
+
+/// The bytes-out quota trips after the host has answered; same requirement.
+#[test]
+fn strict_replay_of_bytes_out_exceeded_ends_in_same_error() {
+    let config = VmConfig {
+        max_tool_bytes_out: 1_000,
+        ..VmConfig::default()
+    };
+    let (recorded, rec_vm) = record(BLOB_CALL, config.clone());
+    let recorded_err = strip_line(recorded.unwrap_err());
+    assert!(
+        format!("{recorded_err:?}").contains("tool output bytes limit exceeded"),
+        "unexpected error: {recorded_err:?}"
+    );
+    assert_eq!(rec_vm.transcript().len(), 2);
+    assert_eq!(rec_vm.transcript()[1].tool_name, "blob");
+
+    let (replayed, vm) = strict_replay(BLOB_CALL, &rec_vm, config);
+    assert_eq!(strip_line(replayed.unwrap_err()), recorded_err);
+    assert!(vm.host().divergence().is_none());
+    assert!(vm.host().is_exhausted());
+    assert_eq!(vm.transcript().len(), 2);
     assert_eq!(vm.gas_used(), rec_vm.gas_used());
     assert_eq!(vm.memory_used(), rec_vm.memory_used());
 }
