@@ -12,6 +12,6 @@ pub use canonicalize::{
 pub use poseidon2::{
     bytes_to_fields, field_to_be_bytes32, i64_to_field, poseidon2_hash, u8_to_field, u32_to_field,
 };
-pub use tape::{OracleTape, TapeEntry, TapeHost};
+pub use tape::{Divergence, OracleTape, TapeCall, TapeEntry, TapeHost};
 pub use tool_registry::ToolRegistry;
 pub use transcript::{ToolCallRecord, ToolCallStatus, Transcript};

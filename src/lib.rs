@@ -11,7 +11,7 @@ pub mod parser;
 pub mod types;
 pub mod vm;
 
-pub use host::tape::{OracleTape, TapeEntry, TapeHost};
+pub use host::tape::{Divergence, OracleTape, TapeCall, TapeEntry, TapeHost};
 pub use host::transcript::{ToolCallRecord, ToolCallStatus, Transcript};
 pub use vm::engine::{HostInterface, NoopHost, Vm, VmConfig, VmOutput};
 pub use vm::gas::{GasMeter, VmError};
