@@ -887,3 +887,50 @@ return time_string
         s("2024-03-05 16:00:00 UTC")
     );
 }
+
+#[test]
+fn string_format_refused_spec_with_many_locals_returns_error() {
+    // The original panic: an error raised by string.format after complex
+    // control flow must be a runtime error, not a panic on LoadLocal.
+    let result = run(r#"
+local timestamp = 1709654400
+local seconds = timestamp % 60
+local minutes = (timestamp // 60) % 60
+local hours = (timestamp // 3600) % 24
+local days = timestamp // 86400
+local year = 1970
+local month = 1
+local day = 1
+local days_remaining = days
+while days_remaining >= 365 do
+    if year % 4 == 0 and (year % 100 ~= 0 or year % 400 == 0) then
+        if days_remaining >= 366 then
+            days_remaining = days_remaining - 366
+            year = year + 1
+        else
+            break
+        end
+    else
+        days_remaining = days_remaining - 365
+        year = year + 1
+    end
+end
+local days_in_month = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+if year % 4 == 0 and (year % 100 ~= 0 or year % 400 == 0) then
+    days_in_month[2] = 29
+end
+while days_remaining >= days_in_month[month] do
+    days_remaining = days_remaining - days_in_month[month]
+    month = month + 1
+    if month > 12 then
+        month = 1
+        year = year + 1
+    end
+end
+day = day + days_remaining
+local time_string = string.format("%.2f-%02d-%02d %02d:%02d:%02d UTC",
+    year, month, day, hours, minutes, seconds)
+return time_string
+"#);
+    assert!(result.is_err());
+}
