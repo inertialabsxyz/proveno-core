@@ -2,7 +2,7 @@
 
 When all commits on a branch are done, `make check` passes, and the review agent has reported back, push and open a PR automatically.
 
-There is no `make test-prove` in this repository; it lives in proveno-zk. If a change affects what gets proved — the program hash, canonical serialization, the oracle tape — run it in a proveno-zk checkout before opening a PR, and note the result in the PR body.
+There is no `make test-prove` in this repository; it lives in proveno-zk. If a change affects what both proving paths recompute — the program hash, canonical serialization, the oracle tape — run it in a proveno-zk checkout before opening a PR, and note the result in the PR body. It is not a hard gate: a change that only adds a builtin or an opcode may leave the Noir circuit behind (see `CLAUDE.md`), and the PR body must say so.
 
 - **Target:** always `main`
 - **State:** always open as **draft**

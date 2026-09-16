@@ -16,7 +16,9 @@ make fix               # auto-format + apply safe clippy fixes
 
 `make check` is the hard pre-commit gate (it runs `lint`, `test`, `test-tls` and `test-nostd`). Run it before every commit. If it fails, fix before continuing.
 
-`make test-prove` lives in proveno-zk, not here. Run it there for any change touching the oracle tape, canonical serialization, or the program and trace encoders, because the circuit recomputes what this repository produces.
+`make test-prove` lives in proveno-zk, not here, and it is not a hard gate on this repository (decided September 2026). OpenVM is the proving path: its guest runs this interpreter as ordinary Rust, so a new builtin or opcode needs no circuit work. The Noir circuit executes bytecode in-circuit and is allowed to lag.
+
+Run it in proveno-zk, and report the result in the PR, for any change to the oracle tape, canonical serialization, or the program and trace encoders: both proving paths recompute those. For a change that only adds a builtin or an opcode, state in the PR that the Noir circuit does not yet cover it.
 
 Plain `cargo test` (the gate documented in `CLAUDE.md`) runs the same suite as `make test` and is acceptable when you only need the test pass; use `make check` when committing.
 
