@@ -768,6 +768,244 @@ return json.encode(t2)
     );
 }
 
+// ── decimal ───────────────────────────────────────────────────────────────────
+
+/// Runs `decimal.<call>` under pcall and returns the error message.
+fn decimal_error(call: &str) -> String {
+    let src = format!(
+        "local ok, err = pcall(function() return decimal.{call} end)\n\
+         if ok then return \"no error\" end\n\
+         return err"
+    );
+    match run_ok(&src).return_value {
+        LuaValue::String(m) => String::from_utf8_lossy(m.as_bytes()).into_owned(),
+        other => panic!("{call}: expected an error string, got {other:?}"),
+    }
+}
+
+#[test]
+fn decimal_parse_basic() {
+    assert_returns_int(r#"return decimal.parse("2550.75", 2)"#, 255075);
+    assert_returns_int(r#"return decimal.parse("0.01", 2)"#, 1);
+    assert_returns_int(r#"return decimal.parse("42", 0)"#, 42);
+}
+
+#[test]
+fn decimal_parse_pads_fewer_fractional_digits() {
+    assert_returns_int(r#"return decimal.parse("2550.7", 2)"#, 255070);
+    assert_returns_int(r#"return decimal.parse("2550", 2)"#, 255000);
+    assert_returns_int(r#"return decimal.parse("1.5", 8)"#, 150_000_000);
+}
+
+#[test]
+fn decimal_parse_negatives() {
+    assert_returns_int(r#"return decimal.parse("-2550.75", 2)"#, -255075);
+    assert_returns_int(r#"return decimal.parse("-0.05", 2)"#, -5);
+    assert_returns_int(r#"return decimal.parse("-0", 2)"#, 0);
+    assert_returns_int(
+        r#"return decimal.parse("-9223372036854775808", 0)"#,
+        i64::MIN,
+    );
+}
+
+#[test]
+fn decimal_parse_too_many_fractional_digits_is_an_error() {
+    let msg = decimal_error(r#"parse("2550.755", 2)"#);
+    assert!(
+        msg.contains("3 fractional digits, more than scale 2"),
+        "{msg}"
+    );
+    // Even a trailing zero: parse never drops a digit, rescale decides.
+    let msg = decimal_error(r#"parse("2550.750", 2)"#);
+    assert!(msg.contains("more than scale 2"), "{msg}");
+    assert!(msg.contains("decimal.rescale"), "{msg}");
+    let msg = decimal_error(r#"parse("1.5", 0)"#);
+    assert!(msg.contains("more than scale 0"), "{msg}");
+}
+
+#[test]
+fn decimal_parse_i64_overflow_is_an_error() {
+    let msg = decimal_error(r#"parse("9223372036854775808", 0)"#);
+    assert!(msg.contains("does not fit in a 64-bit integer"), "{msg}");
+    let msg = decimal_error(r#"parse("-9223372036854775809", 0)"#);
+    assert!(msg.contains("does not fit in a 64-bit integer"), "{msg}");
+    // Fits as written, overflows once padded to the scale.
+    let msg = decimal_error(r#"parse("92233720368547758.08", 3)"#);
+    assert!(msg.contains("does not fit in a 64-bit integer"), "{msg}");
+    assert_returns_int(
+        r#"return decimal.parse("92233720368547758.07", 2)"#,
+        i64::MAX,
+    );
+}
+
+#[test]
+fn decimal_parse_junk_is_an_error() {
+    for (text, expect) in [
+        ("", "empty string"),
+        ("-", "has no digits"),
+        (".", "needs a digit before '.'"),
+        ("-.5", "needs a digit before '.'"),
+        (".5", "needs a digit before '.'"),
+        ("5.", "needs a digit after '.'"),
+        ("1.2.3", "more than one '.'"),
+        ("+1", "unexpected '+' at position 1"),
+        ("--1", "unexpected '-' at position 2"),
+        ("1-", "unexpected '-' at position 2"),
+        (" 1", "unexpected byte 0x20 at position 1"),
+        ("1 ", "unexpected byte 0x20 at position 2"),
+        ("1,000.00", "unexpected ',' at position 2"),
+        ("abc", "unexpected 'a' at position 1"),
+        ("1e5", "exponent notation"),
+        ("-2.5E-3", "exponent notation"),
+        ("0x10", "unexpected 'x' at position 2"),
+        ("nan", "unexpected 'n' at position 1"),
+    ] {
+        let msg = decimal_error(&format!("parse({text:?}, 2)"));
+        assert!(msg.starts_with("decimal.parse: "), "{text:?}: {msg}");
+        assert!(msg.contains(expect), "{text:?}: {msg}");
+    }
+}
+
+#[test]
+fn decimal_parse_wrong_types_are_errors() {
+    let msg = decimal_error("parse(2550, 2)");
+    assert!(msg.contains("expected string"), "{msg}");
+    let msg = decimal_error(r#"parse("1", "2")"#);
+    assert!(msg.contains("expected integer"), "{msg}");
+    let msg = decimal_error(r#"parse("1")"#);
+    assert!(msg.contains("missing argument 2"), "{msg}");
+}
+
+#[test]
+fn decimal_format_basic() {
+    assert_returns_str("return decimal.format(255075, 2)", "2550.75");
+    assert_returns_str("return decimal.format(255070, 2)", "2550.70");
+    assert_returns_str("return decimal.format(5, 2)", "0.05");
+    assert_returns_str("return decimal.format(0, 2)", "0.00");
+    assert_returns_str("return decimal.format(42, 0)", "42");
+}
+
+#[test]
+fn decimal_format_negatives_keep_their_sign() {
+    assert_returns_str("return decimal.format(-255075, 2)", "-2550.75");
+    assert_returns_str("return decimal.format(-5, 2)", "-0.05");
+    assert_returns_str("return decimal.format(-42, 0)", "-42");
+    assert_returns_str(
+        "return decimal.format(math.mininteger, 4)",
+        "-922337203685477.5808",
+    );
+}
+
+#[test]
+fn decimal_parse_format_round_trip_across_scales() {
+    assert_returns_true(
+        r#"
+local texts = { "0", "1", "-1", "2550.75", "-2550.75", "0.000001", "123456789.123456789" }
+local values = { 0, 1, -1, 255075, math.maxinteger, math.mininteger }
+local all_equal = true
+local parsed = 0
+for scale = 0, 18 do
+  for _, text in ipairs(texts) do
+    local ok, value = pcall(function() return decimal.parse(text, scale) end)
+    if ok then
+      parsed = parsed + 1
+      if decimal.parse(decimal.format(value, scale), scale) ~= value then
+        all_equal = false
+      end
+    end
+  end
+  for _, value in ipairs(values) do
+    if decimal.parse(decimal.format(value, scale), scale) ~= value then
+      all_equal = false
+    end
+  end
+end
+-- 57 for "0", "1" and "-1"; 28 for +-2550.75 at scales 2..15; 13 for
+-- 0.000001 at 6..18; 2 for 123456789.123456789 at 9 and 10.
+return all_equal and parsed == 100
+"#,
+    );
+}
+
+#[test]
+fn decimal_scale_out_of_range_is_an_error() {
+    for call in [
+        r#"parse("1", -1)"#,
+        r#"parse("1", 19)"#,
+        "format(1, 19)",
+        "format(1, -1)",
+        "rescale(1, 19, 0)",
+        "rescale(1, 0, 19)",
+    ] {
+        let msg = decimal_error(call);
+        assert!(
+            msg.contains("scale must be between 0 and 18"),
+            "{call}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn decimal_rescale_widening_is_exact() {
+    assert_returns_int("return decimal.rescale(255075, 2, 8)", 255_075_000_000);
+    assert_returns_int("return decimal.rescale(-255075, 2, 4)", -25_507_500);
+    assert_returns_int("return decimal.rescale(7, 3, 3)", 7);
+}
+
+#[test]
+fn decimal_rescale_widening_overflow_is_an_error() {
+    let msg = decimal_error("rescale(math.maxinteger, 0, 1)");
+    assert!(msg.contains("does not fit in a 64-bit integer"), "{msg}");
+    let msg = decimal_error("rescale(math.mininteger, 0, 1)");
+    assert!(msg.contains("does not fit in a 64-bit integer"), "{msg}");
+}
+
+#[test]
+fn decimal_rescale_narrowing_drops_only_zeros() {
+    assert_returns_int("return decimal.rescale(255075000000, 8, 2)", 255075);
+    assert_returns_int("return decimal.rescale(-255070, 2, 1)", -25507);
+    assert_returns_int("return decimal.rescale(0, 18, 0)", 0);
+}
+
+#[test]
+fn decimal_rescale_narrowing_a_non_zero_digit_is_an_error() {
+    let msg = decimal_error("rescale(255075, 2, 1)");
+    assert!(msg.contains("2550.75 (255075 at scale 2)"), "{msg}");
+    assert!(msg.contains("non-zero digit beyond scale 1"), "{msg}");
+    let msg = decimal_error("rescale(-1, 18, 17)");
+    assert!(msg.contains("-0.000000000000000001"), "{msg}");
+}
+
+/// Parse at the source's precision, then narrow: the pattern for inputs such
+/// as "2550.75000000" that carry trailing zeros.
+#[test]
+fn decimal_parse_then_rescale_accepts_trailing_zeros() {
+    assert_returns_int(
+        r#"return decimal.rescale(decimal.parse("2550.75000000", 8), 8, 2)"#,
+        255075,
+    );
+}
+
+/// End to end: JSON numbers kept as text by `json.decode_strings`, parsed, compared, summed and
+/// formatted, through the parser, compiler, verifier and VM.
+#[test]
+fn decimal_end_to_end_program() {
+    assert_returns_str(
+        r#"
+local quote = json.decode_strings('{"bid": 2550.75, "ask": 2551.5, "fee": -0.25}')
+local bid = decimal.parse(quote.bid, 2)
+local ask = decimal.parse(quote.ask, 2)
+local fee = decimal.parse(quote.fee, 2)
+if ask <= bid then return "crossed" end
+local spread = ask - bid + fee
+local ok, err = pcall(function() return decimal.parse("2550.755", 2) end)
+local bad = ok and "accepted" or "refused"
+return decimal.format(spread, 2) .. " " .. decimal.format(decimal.rescale(spread, 2, 4), 4) .. " " .. bad
+"#,
+        "0.50 0.5000 refused",
+    );
+}
+
 // ── pcall with builtins ───────────────────────────────────────────────────────
 
 #[test]

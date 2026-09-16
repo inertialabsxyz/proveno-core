@@ -768,3 +768,85 @@ fn test_concat_two() {
     let code = top_code(r#"local s = "a" .. "b""#);
     assert!(code.iter().any(|i| matches!(i, Instruction::Concat(2))));
 }
+
+// ---------------------------------------------------------------------------
+// decimal module: adding builtins moves no existing program
+// ---------------------------------------------------------------------------
+
+const STDLIB_PROGRAM: &str = r#"
+local decimal = json.decode_strings('{"p": "2550.75"}')
+local cents = math.scale_div(255075, 100, 1)
+return string.format("%d", cents) .. decimal.p
+"#;
+
+/// Recorded on `76e44ba`, before the decimal module existed. The program uses
+/// `math`, `json` and `string`, and a local named `decimal`, which must still
+/// resolve to the local rather than the new module.
+#[test]
+fn test_stdlib_program_bytecode_is_unchanged_by_decimal() {
+    use Instruction::*;
+    let prog = compile_src!(STDLIB_PROGRAM);
+    assert_eq!(prog.prototypes.len(), 1);
+    assert_eq!(
+        prog.prototypes[0].code,
+        vec![
+            PushK(0),
+            GetField(1),
+            PushK(2),
+            Call(1),
+            StoreLocal(0),
+            PushK(3),
+            GetField(4),
+            PushK(5),
+            PushK(6),
+            PushK(7),
+            Call(3),
+            StoreLocal(1),
+            PushK(8),
+            GetField(9),
+            PushK(10),
+            LoadLocal(1),
+            Call(2),
+            LoadLocal(0),
+            GetField(11),
+            Concat(2),
+            Ret(1),
+            Ret(0),
+        ]
+    );
+    assert_eq!(
+        proveno::compiler::program_hash::compute_program_hash_sha256(&prog.prototypes),
+        [
+            160, 218, 248, 105, 180, 175, 93, 23, 212, 122, 34, 57, 165, 228, 24, 136, 115, 127,
+            36, 21, 0, 168, 45, 214, 71, 53, 82, 199, 102, 86, 194, 185
+        ]
+    );
+}
+
+/// Recorded on `76e44ba`, before the decimal module existed.
+#[cfg(feature = "poseidon")]
+#[test]
+fn test_stdlib_program_hash_is_unchanged_by_decimal() {
+    let prog = compile_src!(STDLIB_PROGRAM);
+    assert_eq!(
+        prog.program_hash,
+        [
+            5, 63, 14, 188, 35, 41, 248, 192, 35, 96, 230, 209, 154, 48, 10, 204, 0, 241, 254, 153,
+            149, 218, 253, 189, 30, 149, 176, 153, 16, 110, 195, 214
+        ]
+    );
+}
+
+/// New builtins are appended, so every existing id keeps its discriminant.
+#[test]
+fn test_existing_builtin_ids_keep_their_values() {
+    use proveno::types::value::BuiltinId;
+    assert_eq!(BuiltinId::Type as u8, 0);
+    assert_eq!(BuiltinId::StringLen as u8, 5);
+    assert_eq!(BuiltinId::StringFormat as u8, 14);
+    assert_eq!(BuiltinId::MathAbs as u8, 16);
+    assert_eq!(BuiltinId::MathScaleDiv as u8, 19);
+    assert_eq!(BuiltinId::TableInsert as u8, 20);
+    assert_eq!(BuiltinId::JsonEncode as u8, 25);
+    assert_eq!(BuiltinId::JsonDecodeStrings as u8, 27);
+}

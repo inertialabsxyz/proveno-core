@@ -52,6 +52,10 @@ pub enum BuiltinId {
     JsonEncode,
     JsonDecode,
     JsonDecodeStrings,
+    // decimal module. Appended after every earlier id so none of them moves.
+    DecimalParse,
+    DecimalFormat,
+    DecimalRescale,
 }
 
 /// A Lua closure: a function prototype index plus captured upvalues.

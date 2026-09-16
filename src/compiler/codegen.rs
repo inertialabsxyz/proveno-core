@@ -985,6 +985,10 @@ impl Compiler {
                         let idx = self.add_string_constant(b"__json", line)?;
                         self.emit(Instruction::PushK(idx), line);
                     }
+                    "decimal" => {
+                        let idx = self.add_string_constant(b"__decimal", line)?;
+                        self.emit(Instruction::PushK(idx), line);
+                    }
                     "tostring" | "tonumber" | "type" | "select" | "unpack" => {
                         // Treated as regular globals resolved by the VM via sentinel key.
                         let idx =
