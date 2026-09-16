@@ -148,6 +148,12 @@ Lua source
   `plain = true` the needle is literal, as in `string.find_literal`; without it
   a pattern metacharacter is still refused, and `match`/`gmatch`/`gsub` remain
   unsupported.
+  `pcall` yields `ok` alone in every single-value position (a one-name `local`,
+  an assignment, a `return`, an argument, a table field, parentheses, an
+  operand), and `ok, result` only in a multi-name `local`, where names beyond
+  the second get `nil`. Assigning both results to variables that already exist,
+  `ok, err = pcall(f)`, is not supported: multiple assignment does not parse,
+  and the parser says so by name.
 - **`vm/gas.rs` + `vm/memory.rs`** — `GasMeter` and `MemoryMeter`. Exhaustion
   raises `VmError`, never panics.
 - **`types/value.rs`** — `LuaValue` (`Nil | Boolean | Integer | LuaString |
