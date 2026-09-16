@@ -400,6 +400,15 @@ impl Parser {
     fn parse_expr_or_assign(&mut self) -> Result<Stmt, ParseError> {
         let expr = self.parse_suffixed_expr()?;
 
+        // `a, b = ...`: multiple assignment to variables that already exist.
+        // The only two-value binding this dialect has is a `local` declaration
+        // from `pcall`, so point at that rather than at "got expression".
+        if self.check(&Token::Comma) {
+            return Err(ParseError::MultiAssignNotSupported {
+                span: self.current_span(),
+            });
+        }
+
         if self.check(&Token::Assign) {
             let span = self.advance().span; // consume `=`
             let value = self.parse_expr()?;

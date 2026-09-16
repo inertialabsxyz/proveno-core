@@ -716,3 +716,130 @@ fn error_code_call_depth_exceeded_is_recoverable() {
     let out = run_ok(src);
     assert_eq!(out.return_value, LuaValue::Boolean(false));
 }
+
+// ── pcall in single-value positions (issue #2) ────────────────────────────────
+//
+// `PCall` pushes two values, `ok` and the result. Only a multi-name `local`
+// consumes both; everywhere else Lua truncates the call to one result, so
+// codegen drops the result. Leaving it on the operand stack made `verify`
+// reject the program with `RetStackMismatch`. Every source below is one of the
+// programs listed in the issue, and each is verified as well as run.
+
+#[test]
+fn pcall_two_name_local_still_binds_both_results() {
+    let out = run_ok("local ok, err = pcall(function() return 1 end) return ok");
+    assert_eq!(out.return_value, LuaValue::Boolean(true));
+}
+
+#[test]
+fn pcall_one_name_local_truncates_to_ok() {
+    let out = run_ok("local ok = pcall(function() return 1 end) return ok");
+    assert_eq!(out.return_value, LuaValue::Boolean(true));
+}
+
+#[test]
+fn pcall_one_name_local_is_false_when_the_function_errors() {
+    let out = run_ok("local ok = pcall(function() error('x') end) return ok");
+    assert_eq!(out.return_value, LuaValue::Boolean(false));
+}
+
+#[test]
+fn pcall_three_name_local_gives_the_extra_name_nil() {
+    let out = run_ok("local ok, err, extra = pcall(function() return 1 end) return ok");
+    assert_eq!(out.return_value, LuaValue::Boolean(true));
+
+    let out = run_ok("local ok, err, extra = pcall(function() return 1 end) return extra");
+    assert_eq!(out.return_value, LuaValue::Nil);
+
+    // The second name still receives the result, as in the two-name form.
+    let out = run_ok("local ok, err, extra = pcall(function() return 7 end) return err");
+    assert_eq!(out.return_value, int(7));
+}
+
+#[test]
+fn pcall_four_name_local_gives_every_extra_name_nil() {
+    let out = run_ok("local ok, err, e2, e3 = pcall(function() return 1 end) return e3");
+    assert_eq!(out.return_value, LuaValue::Nil);
+}
+
+#[test]
+fn pcall_assigned_to_an_existing_local_truncates_to_ok() {
+    let out = run_ok("local x = 0 x = pcall(function() return 1 end) return x");
+    assert_eq!(out.return_value, LuaValue::Boolean(true));
+}
+
+#[test]
+fn pcall_returned_directly_truncates_to_ok() {
+    let out = run_ok("return pcall(function() return 1 end)");
+    assert_eq!(out.return_value, LuaValue::Boolean(true));
+}
+
+#[test]
+fn pcall_in_parentheses_truncates_to_ok() {
+    let out = run_ok("return (pcall(function() return 1 end))");
+    assert_eq!(out.return_value, LuaValue::Boolean(true));
+}
+
+#[test]
+fn pcall_as_a_table_field_contributes_one_value() {
+    let out = run_ok("local t = { pcall(function() return 1 end) } return #t");
+    assert_eq!(out.return_value, int(1));
+
+    let out = run_ok("local t = { pcall(function() return 1 end) } return t[1]");
+    assert_eq!(out.return_value, LuaValue::Boolean(true));
+}
+
+#[test]
+fn pcall_as_a_call_argument_passes_one_value() {
+    let out = run_ok("print(pcall(function() return 1 end)) return 1");
+    assert_eq!(out.return_value, int(1));
+}
+
+#[test]
+fn pcall_returned_from_a_function_truncates_to_ok() {
+    let out = run_ok(
+        "local function f() return pcall(function() return 1 end) end \
+         local a, b = f() return a",
+    );
+    assert_eq!(out.return_value, LuaValue::Boolean(true));
+
+    // `f` returns a single value, so the second name is nil.
+    let out = run_ok(
+        "local function f() return pcall(function() return 1 end) end \
+         local a, b = f() return b",
+    );
+    assert_eq!(out.return_value, LuaValue::Nil);
+}
+
+#[test]
+fn pcall_as_an_operand_truncates_to_ok() {
+    let out = run_ok("return pcall(function() return 1 end) == true");
+    assert_eq!(out.return_value, LuaValue::Boolean(true));
+
+    let out = run_ok("if pcall(function() error('x') end) then return 1 else return 2 end");
+    assert_eq!(out.return_value, int(2));
+}
+
+#[test]
+fn pcall_as_a_bare_statement_leaves_a_balanced_stack() {
+    let out = run_ok("pcall(function() return 1 end) return 5");
+    assert_eq!(out.return_value, int(5));
+}
+
+#[test]
+fn pcall_of_a_builtin_truncates_to_ok() {
+    let out = run_ok("local ok = pcall(string.upper, 'a') return ok");
+    assert_eq!(out.return_value, LuaValue::Boolean(true));
+}
+
+#[test]
+fn assigning_both_pcall_results_to_existing_variables_names_the_working_form() {
+    let src = "local ok, parsed\nok, parsed = pcall(function() return 1 end)\nreturn ok";
+    let err = parse(src).expect_err("multiple assignment should be rejected");
+    let msg = err.message();
+    assert!(
+        msg.contains("pcall") && msg.contains("local ok, err = pcall(...)"),
+        "error should name pcall and the working form, got: {}",
+        msg
+    );
+}

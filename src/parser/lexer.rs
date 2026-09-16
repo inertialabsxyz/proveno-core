@@ -139,6 +139,8 @@ pub enum ParseError {
     DisallowedIdent { span: Span, name: String },
     /// `...` syntax in function definition or expression
     VariadicNotAllowed { span: Span },
+    /// Multiple assignment to existing variables, e.g. `a, b = pcall(f)`
+    MultiAssignNotSupported { span: Span },
 }
 
 impl ParseError {
@@ -157,7 +159,8 @@ impl ParseError {
 
             ParseError::ToolAsValue { .. }
             | ParseError::DisallowedIdent { .. }
-            | ParseError::VariadicNotAllowed { .. } => "ERR_COMPILE",
+            | ParseError::VariadicNotAllowed { .. }
+            | ParseError::MultiAssignNotSupported { .. } => "ERR_COMPILE",
         }
     }
 
@@ -173,7 +176,8 @@ impl ParseError {
             | ParseError::UnexpectedToken { span, .. }
             | ParseError::ExpectedExpr { span }
             | ParseError::ToolAsValue { span }
-            | ParseError::VariadicNotAllowed { span } => *span,
+            | ParseError::VariadicNotAllowed { span }
+            | ParseError::MultiAssignNotSupported { span } => *span,
             ParseError::UnexpectedChar { span, .. } => *span,
             ParseError::DisallowedIdent { span, .. } => *span,
         }
@@ -210,6 +214,12 @@ impl ParseError {
             }
             ParseError::VariadicNotAllowed { .. } => {
                 "variadic arguments (`...`) are not supported".into()
+            }
+            ParseError::MultiAssignNotSupported { .. } => {
+                "multiple assignment is not supported; assigning both results of \
+                 pcall is only supported in a local declaration: write \
+                 `local ok, err = pcall(...)`"
+                    .into()
             }
         }
     }
