@@ -1,3 +1,4 @@
+use proveno::bytecode::verify;
 use proveno::compiler::{Constant, Instruction, compile};
 use proveno::parser::parse;
 
@@ -253,9 +254,18 @@ fn test_tool_as_value_error() {
 
 #[test]
 fn test_pcall_single_result() {
-    // local r = pcall(f, 1)  → LoadLocal(f), PushK(1), PCall(1)
-    let code = top_code("local f = nil\nlocal r = pcall(f, 1)");
+    // local r = pcall(f, 1)  → LoadLocal(f), PushK(1), PCall(1), Pop
+    let src = "local f = nil\nlocal r = pcall(f, 1)";
+    let code = top_code(src);
     assert!(code.iter().any(|i| matches!(i, Instruction::PCall(1))));
+    // PCall pushes ok + result; a one-name local keeps only ok, so the result
+    // is popped immediately. Without this the program fails verification.
+    let pcall_at = code
+        .iter()
+        .position(|i| matches!(i, Instruction::PCall(1)))
+        .expect("PCall(1) present");
+    assert_eq!(code[pcall_at + 1], Instruction::Pop);
+    verify(&compile_src!(src)).expect("single-result pcall must verify");
 }
 
 #[test]
@@ -266,6 +276,93 @@ fn test_pcall_two_results() {
     // Both StoreLocal(1) and StoreLocal(2) should appear (0 = f, 1 = ok, 2 = err).
     assert!(code.contains(&Instruction::StoreLocal(1)));
     assert!(code.contains(&Instruction::StoreLocal(2)));
+}
+
+/// The two-name `local` form is the one shape that already worked, and
+/// programs compiled from it are committed by hash. Truncating pcall in every
+/// other position must not move a single instruction here.
+#[test]
+fn test_pcall_two_name_local_bytecode_is_unchanged() {
+    let code = top_code("local f = nil\nlocal ok, err = pcall(f)");
+    assert_eq!(
+        code,
+        vec![
+            Instruction::PushNil,
+            Instruction::StoreLocal(0),
+            Instruction::LoadLocal(0),
+            Instruction::PCall(0),
+            Instruction::StoreLocal(2),
+            Instruction::StoreLocal(1),
+            Instruction::Ret(0),
+        ]
+    );
+
+    let prog = compile_src!("local ok, err = pcall(function() return 1 end) return ok");
+    assert_eq!(
+        prog.prototypes[0].code,
+        vec![
+            Instruction::Closure(1),
+            Instruction::PCall(0),
+            Instruction::StoreLocal(1),
+            Instruction::StoreLocal(0),
+            Instruction::LoadLocal(0),
+            Instruction::Ret(1),
+            Instruction::Ret(0),
+        ]
+    );
+    assert_eq!(
+        prog.prototypes[1].code,
+        vec![Instruction::PushK(0), Instruction::Ret(1)]
+    );
+}
+
+/// Recorded on `2e766ef`, before pcall was truncated in single-value
+/// positions. A change here means a committed program hash has moved.
+#[cfg(feature = "poseidon")]
+#[test]
+fn test_pcall_two_name_local_program_hash_is_unchanged() {
+    let prog = compile_src!("local f = nil\nlocal ok, err = pcall(f)");
+    assert_eq!(
+        prog.program_hash,
+        [
+            5, 1, 40, 17, 182, 18, 92, 106, 211, 41, 105, 145, 119, 170, 124, 95, 35, 173, 24, 223,
+            70, 111, 151, 29, 108, 233, 159, 42, 177, 126, 75, 186
+        ]
+    );
+
+    let prog = compile_src!("local ok, err = pcall(function() return 1 end) return ok");
+    assert_eq!(
+        prog.program_hash,
+        [
+            46, 189, 155, 106, 105, 84, 158, 85, 231, 209, 235, 144, 97, 180, 50, 50, 15, 26, 162,
+            128, 238, 25, 14, 104, 139, 37, 105, 125, 59, 73, 20, 102
+        ]
+    );
+}
+
+#[test]
+fn test_pcall_multi_name_local_pads_with_nil() {
+    // local ok, err, extra = pcall(f): the two-name prefix is unchanged and the
+    // extra name is appended as PushNil + StoreLocal.
+    let code = top_code("local f = nil\nlocal ok, err, extra = pcall(f)");
+    assert_eq!(
+        code,
+        vec![
+            Instruction::PushNil,
+            Instruction::StoreLocal(0),
+            Instruction::LoadLocal(0),
+            Instruction::PCall(0),
+            Instruction::StoreLocal(2),
+            Instruction::StoreLocal(1),
+            Instruction::PushNil,
+            Instruction::StoreLocal(3),
+            Instruction::Ret(0),
+        ]
+    );
+    verify(&compile_src!(
+        "local f = nil\nlocal ok, err, extra = pcall(f)"
+    ))
+    .expect("multi-name pcall local must verify");
 }
 
 // ---------------------------------------------------------------------------

@@ -380,8 +380,9 @@ impl Compiler {
         let line = decl.span.line;
         let n_names = decl.names.len();
 
-        // Special case: `local a, b = pcall(...)` — 2 names, 1 pcall expr.
-        if n_names == 2 && decl.values.len() == 1 && is_pcall_expr(&decl.values[0]) {
+        // Special case: `local a, b, ... = pcall(...)` — 2 or more names,
+        // 1 pcall expr.
+        if n_names >= 2 && decl.values.len() == 1 && is_pcall_expr(&decl.values[0]) {
             // Compile the pcall — pushes 2 values (ok, result).
             self.compile_pcall_expr(&decl.values[0])?;
             // Declare both locals; the stack has [ok, result] (ok pushed first,
@@ -393,6 +394,13 @@ impl Compiler {
             // Stack top is result (index 1), then ok (index 0).
             self.emit(Instruction::StoreLocal(slot_b), line);
             self.emit(Instruction::StoreLocal(slot_a), line);
+            // pcall yields exactly two values, so any further name gets nil.
+            // Emitted after the two stores so the 2-name form is unchanged.
+            for (name, name_span) in &decl.names[2..] {
+                self.emit(Instruction::PushNil, line);
+                let slot = self.declare_local(name, name_span.line)?;
+                self.emit(Instruction::StoreLocal(slot), line);
+            }
             return Ok(());
         }
 
@@ -1155,7 +1163,22 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile `pcall(...)` where one value is wanted: a one-name `local`, an
+    /// assignment, a `return`, a call argument, a table field, a parenthesised
+    /// expression or an operand.
+    ///
+    /// `PCall` always pushes two values, `ok` and the result. Lua truncates a
+    /// call to one result in these positions, so drop the result and keep `ok`.
+    /// Leaving it on the operand stack is what `bytecode::verify` rejects.
     fn compile_pcall(&mut self, call: &Call) -> Result<(), CompileError> {
+        self.compile_pcall_two_values(call)?;
+        self.emit(Instruction::Pop, call.span.line);
+        Ok(())
+    }
+
+    /// Compile `pcall(...)` keeping both values it pushes, `ok` then the
+    /// result. Only a multi-name `local` consumes both.
+    fn compile_pcall_two_values(&mut self, call: &Call) -> Result<(), CompileError> {
         let line = call.span.line;
         if call.args.is_empty() {
             // pcall() with no args — push nil as the function.
@@ -1171,10 +1194,11 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile a pcall expression (for use in local declarations).
+    /// Compile a pcall expression keeping both values (for use in local
+    /// declarations).
     fn compile_pcall_expr(&mut self, expr: &Expr) -> Result<(), CompileError> {
         match expr {
-            Expr::Call(call) => self.compile_pcall(call),
+            Expr::Call(call) => self.compile_pcall_two_values(call),
             _ => Err(CompileError::MultiReturnNotAllowed {
                 line: expr.span().line,
             }),
