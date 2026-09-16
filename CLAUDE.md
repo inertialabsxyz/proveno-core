@@ -144,6 +144,10 @@ Lua source
   resolves builtins, dispatches `ToolCall` through `ToolRegistry`.
 - **`vm/builtins.rs`** — the standard library (`string.*`, `math.*`, `table.*`,
   `json.*`, `pcall`, `type`, `pairs_sorted`, `ipairs`, `log`, `print`).
+  `string.find` accepts standard Lua's fourth `plain` argument: with
+  `plain = true` the needle is literal, as in `string.find_literal`; without it
+  a pattern metacharacter is still refused, and `match`/`gmatch`/`gsub` remain
+  unsupported.
 - **`vm/gas.rs` + `vm/memory.rs`** — `GasMeter` and `MemoryMeter`. Exhaustion
   raises `VmError`, never panics.
 - **`types/value.rs`** — `LuaValue` (`Nil | Boolean | Integer | LuaString |

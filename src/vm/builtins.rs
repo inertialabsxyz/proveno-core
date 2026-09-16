@@ -379,6 +379,19 @@ fn parse_find_init(args: &[LuaValue], fn_name: &str) -> Result<usize, VmError> {
     Ok(if n < 1 { 0 } else { (n - 1) as usize })
 }
 
+/// Resolve `string.find`'s optional fourth argument: standard Lua's `plain`
+/// flag, which asks for the needle to be matched literally. Absent means false.
+fn parse_find_plain(args: &[LuaValue], fn_name: &str) -> Result<bool, VmError> {
+    match args.get(3) {
+        None => Ok(false),
+        Some(LuaValue::Boolean(b)) => Ok(*b),
+        Some(other) => Err(VmError::TypeError(format!(
+            "{fn_name}: expected boolean for plain, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 /// Literal byte-substring search shared by `string.find` (after its metachar
 /// check) and `string.find_literal` (which skips the check). Returns the
 /// 1-based inclusive [start, end] pair, or `(nil, nil)` if not found.
@@ -417,11 +430,17 @@ fn literal_substring_search(
     }
 }
 
+/// `string.find(s, pat [, init [, plain]])`. `plain = true` is standard Lua's
+/// literal search, identical to `string.find_literal`. Without it the pattern
+/// is still refused if it contains a metacharacter.
 fn string_find(args: &[LuaValue], gas: &mut GasMeter) -> Result<Vec<LuaValue>, VmError> {
     let s = require_string(args, 0, "string.find")?;
     let pat = require_string(args, 1, "string.find")?;
     let init = parse_find_init(args, "string.find")?;
-    check_no_pattern_metachar(pat.as_bytes())?;
+    let plain = parse_find_plain(args, "string.find")?;
+    if !plain {
+        check_no_pattern_metachar(pat.as_bytes())?;
+    }
     literal_substring_search(s.as_bytes(), pat.as_bytes(), init, gas)
 }
 
@@ -1662,6 +1681,9 @@ mod tests {
     fn s(text: &str) -> LuaValue {
         LuaValue::String(LuaString::from_str(text))
     }
+    fn boolean(b: bool) -> LuaValue {
+        LuaValue::Boolean(b)
+    }
     fn make_table() -> Rc<RefCell<LuaTable>> {
         Rc::new(RefCell::new(LuaTable::new()))
     }
@@ -1928,6 +1950,56 @@ mod tests {
     fn string_find_with_init() {
         let r = dispatch(BuiltinId::StringFind, vec![s("abcabc"), s("b"), int(3)]).unwrap();
         assert_eq!(r, vec![int(5), int(5)]);
+    }
+
+    #[test]
+    fn string_find_plain_true_finds_metachar() {
+        let r = dispatch(
+            BuiltinId::StringFind,
+            vec![s("3245.67"), s("."), int(1), boolean(true)],
+        )
+        .unwrap();
+        assert_eq!(r, vec![int(5), int(5)]);
+    }
+
+    #[test]
+    fn string_find_plain_true_not_found_returns_nil_pair() {
+        let r = dispatch(
+            BuiltinId::StringFind,
+            vec![s("3245"), s("."), int(1), boolean(true)],
+        )
+        .unwrap();
+        assert_eq!(r, vec![LuaValue::Nil, LuaValue::Nil]);
+    }
+
+    #[test]
+    fn string_find_plain_false_still_refuses_pattern() {
+        let err = dispatch(
+            BuiltinId::StringFind,
+            vec![s("3245.67"), s("."), int(1), boolean(false)],
+        )
+        .unwrap_err();
+        assert!(matches!(err, VmError::RuntimeError(_)));
+    }
+
+    #[test]
+    fn string_find_plain_false_matches_plain_needle() {
+        let r = dispatch(
+            BuiltinId::StringFind,
+            vec![s("hello world"), s("world"), int(1), boolean(false)],
+        )
+        .unwrap();
+        assert_eq!(r, vec![int(7), int(11)]);
+    }
+
+    #[test]
+    fn string_find_plain_non_boolean_is_an_error() {
+        let err = dispatch(
+            BuiltinId::StringFind,
+            vec![s("3245.67"), s("."), int(1), int(1)],
+        )
+        .unwrap_err();
+        assert!(matches!(err, VmError::TypeError(_)));
     }
 
     // ── string.find_literal ───────────────────────────────────────────────────

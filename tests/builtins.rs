@@ -273,6 +273,33 @@ fn string_find_metachar_error() {
     assert!(matches!(err, VmError::RuntimeError(_)));
 }
 
+#[test]
+fn string_find_plain_flag_matches_dot_literally() {
+    // The 16 September 2026 cold test wrote exactly this call, standard Lua,
+    // and the VM refused it.
+    assert_returns_int(
+        r#"local i, j = string.find("3245.67", ".", 1, true) return i"#,
+        5,
+    );
+}
+
+#[test]
+fn string_find_plain_flag_not_found_returns_nil() {
+    assert_returns_nil(r#"local i, j = string.find("3245", ".", 1, true) return i"#);
+}
+
+#[test]
+fn string_find_plain_false_still_refuses_pattern() {
+    let err = run(r#"string.find("3245.67", ".", 1, false)"#).unwrap_err();
+    assert!(matches!(err, VmError::RuntimeError(_)));
+}
+
+#[test]
+fn string_find_plain_non_boolean_is_a_type_error() {
+    let err = run(r#"string.find("3245.67", ".", 1, 1)"#).unwrap_err();
+    assert!(matches!(err, VmError::TypeError(_)));
+}
+
 // ── string.find_literal ───────────────────────────────────────────────────────
 
 #[test]
