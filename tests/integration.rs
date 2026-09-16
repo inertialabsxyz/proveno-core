@@ -831,3 +831,15 @@ fn pcall_of_a_builtin_truncates_to_ok() {
     let out = run_ok("local ok = pcall(string.upper, 'a') return ok");
     assert_eq!(out.return_value, LuaValue::Boolean(true));
 }
+
+#[test]
+fn assigning_both_pcall_results_to_existing_variables_names_the_working_form() {
+    let src = "local ok, parsed\nok, parsed = pcall(function() return 1 end)\nreturn ok";
+    let err = parse(src).expect_err("multiple assignment should be rejected");
+    let msg = err.message();
+    assert!(
+        msg.contains("pcall") && msg.contains("local ok, err = pcall(...)"),
+        "error should name pcall and the working form, got: {}",
+        msg
+    );
+}

@@ -365,6 +365,16 @@ fn test_pcall_multi_name_local_pads_with_nil() {
     .expect("multi-name pcall local must verify");
 }
 
+#[test]
+fn test_multi_assign_reports_the_working_pcall_form() {
+    let err = parse("local ok, parsed\nok, parsed = pcall(f)")
+        .expect_err("multiple assignment is not supported");
+    let msg = err.message();
+    assert!(msg.contains("pcall"), "got: {}", msg);
+    assert!(msg.contains("local ok, err = pcall(...)"), "got: {}", msg);
+    assert_eq!(err.code(), "ERR_COMPILE");
+}
+
 // ---------------------------------------------------------------------------
 // Function declaration and closures
 // ---------------------------------------------------------------------------
