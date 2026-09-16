@@ -154,6 +154,7 @@ Lua source
   the second get `nil`. Assigning both results to variables that already exist,
   `ok, err = pcall(f)`, is not supported: multiple assignment does not parse,
   and the parser says so by name.
+  `s:name(...)` on a string is `string.name(s, ...)`, resolved in `GetField` (no new opcode); a missing name errors naming it.
 - **`vm/gas.rs` + `vm/memory.rs`** — `GasMeter` and `MemoryMeter`. Exhaustion
   raises `VmError`, never panics.
 - **`types/value.rs`** — `LuaValue` (`Nil | Boolean | Integer | LuaString |
