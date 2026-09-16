@@ -38,8 +38,16 @@ Note `make lint` runs plain `cargo clippy`, not `--all-targets`, so lints inside
 `tests/*.rs` are not gated.
 
 There is no `test-prove` here. The Noir prove/verify pipeline lives in
-proveno-zk; run it there for any change to the compiler, the ISA, canonical
-serialization or the oracle tape, because those are what the circuit recomputes.
+proveno-zk, and it is **not** a hard gate on this repository (decided September
+2026): OpenVM is the proving path, and its guest runs this interpreter as
+ordinary Rust, so a new builtin or opcode needs no circuit work. The Noir
+circuit executes bytecode in-circuit, so it lags until someone needs it.
+
+Still run `make test-prove` in proveno-zk, and report the result, for a change
+to canonical serialization, the oracle tape or the program hash: those are what
+both proving paths recompute, and a break there is a break everywhere. A change
+that only adds a builtin or an opcode may leave Noir behind; say so in the PR
+body so nobody assumes the circuit kept up.
 
 ## Common Commands
 
