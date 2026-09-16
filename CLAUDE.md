@@ -143,7 +143,14 @@ Lua source
 - **`vm/engine.rs`** — `Vm` and the dispatch loop. Owns the `CallFrame` stack,
   resolves builtins, dispatches `ToolCall` through `ToolRegistry`.
 - **`vm/builtins.rs`** — the standard library (`string.*`, `math.*`, `table.*`,
-  `json.*`, `pcall`, `type`, `pairs_sorted`, `ipairs`, `log`, `print`).
+  `json.*`, `decimal.*`, `pcall`, `type`, `pairs_sorted`, `ipairs`, `log`,
+  `print`).
+  `decimal.parse(text, scale)`, `decimal.format(value, scale)` and
+  `decimal.rescale(value, from, to)` convert between decimal strings and
+  integers counting 10^-scale units, for scales 0 to 18. They never drop a
+  digit: more fractional digits than `scale` (trailing zeros included), or
+  narrowing past a non-zero digit, is an error, as is `i64` overflow. They do
+  not divide; `math.scale_div` does, and truncates.
   `string.find` accepts standard Lua's fourth `plain` argument: with
   `plain = true` the needle is literal, as in `string.find_literal`; without it
   a pattern metacharacter is still refused, and `match`/`gmatch`/`gsub` remain
