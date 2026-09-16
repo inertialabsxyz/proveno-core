@@ -155,6 +155,9 @@ Lua source
   `ok, err = pcall(f)`, is not supported: multiple assignment does not parse,
   and the parser says so by name.
   `s:name(...)` on a string is `string.name(s, ...)`, resolved in `GetField` (no new opcode); a missing name errors naming it.
+  `string.format` takes `%d`, `%x` and `%s` with flags `-` and `0`, a width and
+  a precision (two digits each), and refuses `%f`/`%e`/`%g`, pointing at
+  decimal strings, because there are no floats.
 - **`vm/gas.rs` + `vm/memory.rs`** — `GasMeter` and `MemoryMeter`. Exhaustion
   raises `VmError`, never panics.
 - **`types/value.rs`** — `LuaValue` (`Nil | Boolean | Integer | LuaString |

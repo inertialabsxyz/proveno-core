@@ -584,6 +584,28 @@ fn string_char(
     Ok(vec![LuaValue::String(LuaString::from_bytes(&buf))])
 }
 
+const FORMAT_SUPPORTED: &str = "supported: %d, %x and %s, with flags '-' and '0' \
+     (not '0' on %s), a width and a precision of at most 2 digits each, and %%";
+
+/// Reads an optional width or precision of at most two decimal digits.
+fn format_read_number(fmt: &[u8], i: &mut usize) -> Result<Option<usize>, VmError> {
+    let start = *i;
+    while *i < fmt.len() && fmt[*i].is_ascii_digit() {
+        *i += 1;
+    }
+    let digits = &fmt[start..*i];
+    if digits.len() > 2 {
+        return Err(runtime_err(&format!(
+            "string.format: width or precision '{}' is too long; {}",
+            String::from_utf8_lossy(digits),
+            FORMAT_SUPPORTED
+        )));
+    }
+    Ok(digits.iter().fold(None, |acc, d| {
+        Some(acc.unwrap_or(0) * 10 + (d - b'0') as usize)
+    }))
+}
+
 fn string_format(
     args: &[LuaValue],
     gas: &mut GasMeter,
@@ -606,51 +628,114 @@ fn string_format(
         if i >= fmt_bytes.len() {
             return Err(runtime_err("string.format: trailing % in format string"));
         }
-        match fmt_bytes[i] {
-            b'%' => {
-                result.push(b'%');
-                i += 1;
+        if fmt_bytes[i] == b'%' {
+            result.push(b'%');
+            i += 1;
+            continue;
+        }
+
+        let spec_start = i - 1;
+        let mut left_align = false;
+        let mut zero_pad = false;
+        while i < fmt_bytes.len() && matches!(fmt_bytes[i], b'-' | b'0') {
+            if fmt_bytes[i] == b'-' {
+                left_align = true;
+            } else {
+                zero_pad = true;
             }
-            b'd' => {
+            i += 1;
+        }
+        let width = format_read_number(&fmt_bytes, &mut i)?;
+        let precision = if i < fmt_bytes.len() && fmt_bytes[i] == b'.' {
+            i += 1;
+            Some(format_read_number(&fmt_bytes, &mut i)?.unwrap_or(0))
+        } else {
+            None
+        };
+        let Some(&conv) = fmt_bytes.get(i) else {
+            return Err(runtime_err(&format!(
+                "string.format: incomplete format specifier '{}'; {}",
+                String::from_utf8_lossy(&fmt_bytes[spec_start..]),
+                FORMAT_SUPPORTED
+            )));
+        };
+        i += 1;
+
+        let body: Vec<u8> = match conv {
+            b'd' | b'x' => {
                 let n = require_integer(args, arg_idx, "string.format")?;
                 arg_idx += 1;
-                let s = n.to_string();
-                result.extend_from_slice(s.as_bytes());
-                i += 1;
+                let (negative, digits) = if conv == b'd' {
+                    (n < 0, n.unsigned_abs().to_string())
+                } else {
+                    // Negative values print as their unsigned 64-bit pattern.
+                    (false, format!("{:x}", n as u64))
+                };
+                let mut out = Vec::new();
+                if negative {
+                    out.push(b'-');
+                }
+                match precision {
+                    // C semantics: precision is the minimum digit count, and a
+                    // zero value with precision 0 prints no digits at all.
+                    Some(0) if n == 0 => {}
+                    Some(p) => {
+                        out.resize(out.len() + p.saturating_sub(digits.len()), b'0');
+                        out.extend_from_slice(digits.as_bytes());
+                    }
+                    None => {
+                        let pad = if zero_pad && !left_align {
+                            width.unwrap_or(0).saturating_sub(out.len() + digits.len())
+                        } else {
+                            0
+                        };
+                        out.resize(out.len() + pad, b'0');
+                        out.extend_from_slice(digits.as_bytes());
+                    }
+                }
+                out
             }
             b's' => {
+                if zero_pad {
+                    return Err(runtime_err(&format!(
+                        "string.format: flag '0' is not valid with '%s'; {}",
+                        FORMAT_SUPPORTED
+                    )));
+                }
                 let v = require_arg(args, arg_idx, "string.format")?;
                 arg_idx += 1;
                 let s = v.to_lua_string();
-                result.extend_from_slice(s.as_bytes());
-                i += 1;
+                let bytes = s.as_bytes();
+                let take = precision.map_or(bytes.len(), |p| p.min(bytes.len()));
+                bytes[..take].to_vec()
             }
-            b'x' => {
-                let n = require_integer(args, arg_idx, "string.format")?;
-                arg_idx += 1;
-                let s = if n < 0 {
-                    // Treat as unsigned 64-bit
-                    format!("{:x}", n as u64)
-                } else {
-                    format!("{:x}", n)
-                };
-                result.extend_from_slice(s.as_bytes());
-                i += 1;
-            }
-            b'0'..=b'9' | b'-' | b'.' | b'*' => {
-                return Err(runtime_err(
-                    "string.format: width/precision specifiers not supported in v0.2",
-                ));
-            }
-            other => {
-                return Err(VmError::RuntimeError(LuaValue::String(
-                    LuaString::from_str(&format!(
-                        "string.format: unsupported format specifier '%{}'",
-                        other as char
-                    )),
+            b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'a' | b'A' => {
+                return Err(runtime_err(&format!(
+                    "string.format: '%{}' needs a float, and the VM has no floats. \
+                     A non-integer number is a decimal string such as \"2550.75\": \
+                     print it with %s, or scale it to an integer (cents) and print \
+                     that with %d",
+                    conv as char
                 )));
             }
+            _ => {
+                return Err(runtime_err(&format!(
+                    "string.format: unsupported format specifier '{}'; {}",
+                    String::from_utf8_lossy(&fmt_bytes[spec_start..i]),
+                    FORMAT_SUPPORTED
+                )));
+            }
+        };
+
+        let pad = width.unwrap_or(0).saturating_sub(body.len());
+        if left_align {
+            result.extend_from_slice(&body);
+            result.resize(result.len() + pad, b' ');
+        } else {
+            result.resize(result.len() + pad, b' ');
+            result.extend_from_slice(&body);
         }
+        check_string_len(result.len())?;
     }
 
     check_string_len(result.len())?;
@@ -2179,6 +2264,107 @@ mod tests {
     fn string_format_unsupported_spec() {
         let err = dispatch(BuiltinId::StringFormat, vec![s("%q"), s("x")]).unwrap_err();
         assert!(matches!(err, VmError::RuntimeError(_)));
+    }
+
+    fn fmt_ok(spec: &str, arg: LuaValue) -> LuaValue {
+        dispatch(BuiltinId::StringFormat, vec![s(spec), arg])
+            .unwrap()
+            .remove(0)
+    }
+
+    fn fmt_err(spec: &str, arg: LuaValue) -> String {
+        match dispatch(BuiltinId::StringFormat, vec![s(spec), arg]).unwrap_err() {
+            VmError::RuntimeError(LuaValue::String(m)) => {
+                String::from_utf8(m.as_bytes().to_vec()).unwrap()
+            }
+            other => panic!("expected a runtime error string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn string_format_width_right_aligns_integers() {
+        assert_eq!(fmt_ok("%5d", int(42)), s("   42"));
+        assert_eq!(fmt_ok("%5d", int(-42)), s("  -42"));
+        assert_eq!(fmt_ok("%2d", int(12345)), s("12345"));
+    }
+
+    #[test]
+    fn string_format_minus_flag_left_aligns_integers() {
+        assert_eq!(fmt_ok("%-5d|", int(42)), s("42   |"));
+        assert_eq!(fmt_ok("%-5d|", int(-42)), s("-42  |"));
+        assert_eq!(fmt_ok("%-05d|", int(42)), s("42   |"));
+    }
+
+    #[test]
+    fn string_format_zero_flag_pads_after_the_sign() {
+        assert_eq!(fmt_ok("%05d", int(42)), s("00042"));
+        assert_eq!(fmt_ok("%05d", int(-42)), s("-0042"));
+        assert_eq!(fmt_ok("%02d", int(7)), s("07"));
+        assert_eq!(fmt_ok("%02d", int(123)), s("123"));
+    }
+
+    #[test]
+    fn string_format_integer_precision_is_minimum_digits() {
+        assert_eq!(fmt_ok("%.3d", int(7)), s("007"));
+        assert_eq!(fmt_ok("%.3d", int(-7)), s("-007"));
+        assert_eq!(fmt_ok("%6.3d", int(-7)), s("  -007"));
+        assert_eq!(fmt_ok("%06.3d", int(7)), s("   007"));
+        assert_eq!(fmt_ok("%.0d", int(0)), s(""));
+    }
+
+    #[test]
+    fn string_format_integer_extremes() {
+        assert_eq!(
+            fmt_ok("%25d", int(i64::MIN)),
+            s("     -9223372036854775808")
+        );
+        assert_eq!(fmt_ok("%021d", int(i64::MIN)), s("-09223372036854775808"));
+    }
+
+    #[test]
+    fn string_format_hex_width_and_precision() {
+        assert_eq!(fmt_ok("%04x", int(255)), s("00ff"));
+        assert_eq!(fmt_ok("%-4x|", int(255)), s("ff  |"));
+        assert_eq!(fmt_ok("%.4x", int(255)), s("00ff"));
+        assert_eq!(fmt_ok("%x", int(-1)), s("ffffffffffffffff"));
+    }
+
+    #[test]
+    fn string_format_string_width() {
+        assert_eq!(fmt_ok("%10s", s("abc")), s("       abc"));
+        assert_eq!(fmt_ok("%-10s|", s("abc")), s("abc       |"));
+        assert_eq!(fmt_ok("%2s", s("abcdef")), s("abcdef"));
+    }
+
+    #[test]
+    fn string_format_string_precision_truncates() {
+        assert_eq!(fmt_ok("%.3s", s("abcdef")), s("abc"));
+        assert_eq!(fmt_ok("%.3s", s("ab")), s("ab"));
+        assert_eq!(fmt_ok("%.0s", s("abc")), s(""));
+        assert_eq!(fmt_ok("%5.2s|", s("abc")), s("   ab|"));
+        assert_eq!(fmt_ok("%-5.2s|", s("abc")), s("ab   |"));
+        assert_eq!(fmt_ok("%.1s", int(-42)), s("-"));
+    }
+
+    #[test]
+    fn string_format_float_specifiers_point_at_decimal_strings() {
+        for spec in ["%f", "%.2f", "%10.2f", "%e", "%g", "%G", "%a"] {
+            let msg = fmt_err(spec, int(1));
+            assert!(msg.contains("no floats"), "{spec}: {msg}");
+            assert!(msg.contains("decimal string"), "{spec}: {msg}");
+            assert!(!msg.contains("v0."), "{spec}: {msg}");
+        }
+    }
+
+    #[test]
+    fn string_format_unsupported_forms_name_what_is_supported() {
+        for spec in [
+            "%+d", "% d", "%#x", "%*d", "%q", "%05s", "%100d", "%.100s", "%5",
+        ] {
+            let msg = fmt_err(spec, int(1));
+            assert!(msg.contains("supported: %d, %x and %s"), "{spec}: {msg}");
+            assert!(!msg.contains("v0."), "{spec}: {msg}");
+        }
     }
 
     // ── math.abs ──────────────────────────────────────────────────────────────

@@ -410,6 +410,40 @@ fn string_format_percent() {
 }
 
 #[test]
+fn string_format_width_and_flags_on_integers() {
+    assert_returns_str(
+        r#"return string.format("[%5d][%-5d][%05d][%05d]", 42, 42, 42, -42)"#,
+        "[   42][42   ][00042][-0042]",
+    );
+}
+
+#[test]
+fn string_format_width_and_precision_on_strings() {
+    assert_returns_str(
+        r#"return string.format("[%10s][%-6s][%.3s]", "abc", "ab", "truncated")"#,
+        "[       abc][ab    ][tru]",
+    );
+}
+
+#[test]
+fn string_format_price_from_integer_cents() {
+    // The integer-only way to print 3245.07: split scaled cents, pad the fraction.
+    assert_returns_str(
+        r#"local cents = 324507 return string.format("$%d.%02d", cents // 100, cents % 100)"#,
+        "$3245.07",
+    );
+}
+
+#[test]
+fn string_format_float_specifier_error_points_at_decimal_strings() {
+    let err = run(r#"return string.format("%.2f", 3)"#).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(msg.contains("no floats"), "{msg}");
+    assert!(msg.contains("decimal string"), "{msg}");
+    assert!(!msg.contains("v0.2"), "{msg}");
+}
+
+#[test]
 fn string_format_mixed() {
     assert_returns_str(
         r#"return string.format("%d + %d = %d", 1, 2, 3)"#,
@@ -802,12 +836,12 @@ return string.len(encoded)
     assert!(matches!(out.return_value, LuaValue::Integer(n) if n > 0));
 }
 
-// ── Regression: unsupported format spec must not panic ────────────────────────
+// ── Regression: format after many locals must not panic ───────────────────────
 
 #[test]
-fn string_format_unsupported_spec_with_many_locals_returns_error() {
-    // string.format with %04d (unsupported width specifier) after complex
-    // control flow must return a runtime error, not panic on LoadLocal.
+fn string_format_zero_padded_date_with_many_locals() {
+    // string.format after complex control flow once panicked on LoadLocal when
+    // it raised an error. %04d is now supported, so the program must succeed.
     let result = run(r#"
 local timestamp = 1709654400
 local seconds = timestamp % 60
@@ -845,6 +879,56 @@ while days_remaining >= days_in_month[month] do
 end
 day = day + days_remaining
 local time_string = string.format("%04d-%02d-%02d %02d:%02d:%02d UTC",
+    year, month, day, hours, minutes, seconds)
+return time_string
+"#);
+    assert_eq!(
+        result.expect("execution failed").return_value,
+        s("2024-03-05 16:00:00 UTC")
+    );
+}
+
+#[test]
+fn string_format_refused_spec_with_many_locals_returns_error() {
+    // The original panic: an error raised by string.format after complex
+    // control flow must be a runtime error, not a panic on LoadLocal.
+    let result = run(r#"
+local timestamp = 1709654400
+local seconds = timestamp % 60
+local minutes = (timestamp // 60) % 60
+local hours = (timestamp // 3600) % 24
+local days = timestamp // 86400
+local year = 1970
+local month = 1
+local day = 1
+local days_remaining = days
+while days_remaining >= 365 do
+    if year % 4 == 0 and (year % 100 ~= 0 or year % 400 == 0) then
+        if days_remaining >= 366 then
+            days_remaining = days_remaining - 366
+            year = year + 1
+        else
+            break
+        end
+    else
+        days_remaining = days_remaining - 365
+        year = year + 1
+    end
+end
+local days_in_month = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+if year % 4 == 0 and (year % 100 ~= 0 or year % 400 == 0) then
+    days_in_month[2] = 29
+end
+while days_remaining >= days_in_month[month] do
+    days_remaining = days_remaining - days_in_month[month]
+    month = month + 1
+    if month > 12 then
+        month = 1
+        year = year + 1
+    end
+end
+day = day + days_remaining
+local time_string = string.format("%.2f-%02d-%02d %02d:%02d:%02d UTC",
     year, month, day, hours, minutes, seconds)
 return time_string
 "#);
