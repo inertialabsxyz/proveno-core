@@ -719,7 +719,7 @@ fn string_format(
                     "string.format: '%{}' needs a float, and the VM has no floats. \
                      A non-integer number is a decimal string such as \"2550.75\": \
                      print it with %s, or scale it to an integer (cents) and print \
-                     that with %d",
+                     that with decimal.format(value, scale) or %d",
                     conv as char
                 )));
             }
@@ -2569,6 +2569,10 @@ mod tests {
             let msg = fmt_err(spec, int(1));
             assert!(msg.contains("no floats"), "{spec}: {msg}");
             assert!(msg.contains("decimal string"), "{spec}: {msg}");
+            assert!(
+                msg.contains("decimal.format(value, scale)"),
+                "{spec}: {msg}"
+            );
             assert!(!msg.contains("v0."), "{spec}: {msg}");
         }
     }
