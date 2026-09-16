@@ -85,6 +85,11 @@ pub fn call_builtin(
         BuiltinId::JsonEncode => json_encode(args, gas, mem),
         BuiltinId::JsonDecode => json_decode(args, gas, mem),
         BuiltinId::JsonDecodeStrings => json_decode_strings(args, gas, mem),
+
+        // ── decimal ───────────────────────────────────────────────────────────
+        BuiltinId::DecimalParse => decimal_parse(args, gas),
+        BuiltinId::DecimalFormat => decimal_format(args, gas, mem),
+        BuiltinId::DecimalRescale => decimal_rescale(args),
         // log/error are handled as dedicated opcodes; if somehow called as builtins,
         // treat log here for consistency.
     }
@@ -812,6 +817,195 @@ fn math_scale_div(args: &[LuaValue]) -> Result<Vec<LuaValue>, VmError> {
     }
 
     Ok(vec![LuaValue::Integer(result as i64)])
+}
+
+// ── decimal module ────────────────────────────────────────────────────────────
+//
+// A decimal is an integer count of 10^-scale units: 255075 at scale 2 is
+// 2550.75. Everything here is integer arithmetic, checked for overflow.
+// Division, and so rounding, is `math.scale_div`'s job, not this module's.
+
+/// 10^18 is the largest power of ten an `i64` holds.
+const DECIMAL_MAX_SCALE: i64 = 18;
+
+fn require_scale(args: &[LuaValue], idx: usize, fname: &str) -> Result<u32, VmError> {
+    let scale = require_integer(args, idx, fname)?;
+    if !(0..=DECIMAL_MAX_SCALE).contains(&scale) {
+        return Err(runtime_err(&format!(
+            "{fname}: scale must be between 0 and {DECIMAL_MAX_SCALE}, got {scale}"
+        )));
+    }
+    Ok(scale as u32)
+}
+
+/// Quotes a program-supplied string for an error message, cut short so a
+/// 64 KiB argument does not become a 64 KiB error.
+fn quote_excerpt(bytes: &[u8]) -> String {
+    const MAX: usize = 32;
+    if bytes.len() <= MAX {
+        format!("\"{}\"", String::from_utf8_lossy(bytes))
+    } else {
+        format!("\"{}...\"", String::from_utf8_lossy(&bytes[..MAX]))
+    }
+}
+
+/// Parses `-?digits(.digits)?` into an integer count of 10^-scale units.
+/// The error is the reason, without the function name.
+fn parse_decimal(text: &[u8], scale: u32) -> Result<i64, String> {
+    let quoted = quote_excerpt(text);
+    if text.is_empty() {
+        return Err("empty string is not a decimal number".into());
+    }
+
+    let mut dot = None;
+    for (i, &b) in text.iter().enumerate() {
+        match b {
+            b'0'..=b'9' => {}
+            b'-' if i == 0 => {}
+            b'.' if dot.is_none() => dot = Some(i),
+            b'e' | b'E' if i > 0 && text[i - 1].is_ascii_digit() => {
+                return Err(format!(
+                    "{quoted} uses exponent notation, which is not supported"
+                ));
+            }
+            b'.' => return Err(format!("{quoted} has more than one '.'")),
+            0x21..=0x7e => {
+                return Err(format!(
+                    "{quoted} is not a decimal number: unexpected '{}' at position {}",
+                    b as char,
+                    i + 1
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "{quoted} is not a decimal number: unexpected byte 0x{b:02x} at position {}",
+                    i + 1
+                ));
+            }
+        }
+    }
+
+    let negative = text[0] == b'-';
+    let body = if negative { &text[1..] } else { text };
+    let (int_digits, frac_digits) = match dot {
+        Some(i) => {
+            let i = if negative { i - 1 } else { i };
+            (&body[..i], &body[i + 1..])
+        }
+        None => (body, &body[body.len()..]),
+    };
+
+    if int_digits.is_empty() && dot.is_none() {
+        return Err(format!("{quoted} has no digits"));
+    }
+    if int_digits.is_empty() {
+        return Err(format!("{quoted} needs a digit before '.'"));
+    }
+    if dot.is_some() && frac_digits.is_empty() {
+        return Err(format!("{quoted} needs a digit after '.'"));
+    }
+    if frac_digits.len() > scale as usize {
+        return Err(format!(
+            "{quoted} has {} fractional digits, more than scale {scale}; \
+             digits are never dropped silently. Parse at scale {} and narrow \
+             with decimal.rescale, which fails if a dropped digit is non-zero",
+            frac_digits.len(),
+            frac_digits.len()
+        ));
+    }
+
+    let overflow = || format!("{quoted} at scale {scale} does not fit in a 64-bit integer");
+    let padding = scale as usize - frac_digits.len();
+    // Accumulate toward the sign so i64::MIN parses: its magnitude has no
+    // positive i64.
+    let mut n: i64 = 0;
+    for &b in int_digits.iter().chain(frac_digits) {
+        let d = (b - b'0') as i64;
+        n = n.checked_mul(10).ok_or_else(overflow)?;
+        n = if negative {
+            n.checked_sub(d)
+        } else {
+            n.checked_add(d)
+        }
+        .ok_or_else(overflow)?;
+    }
+    for _ in 0..padding {
+        n = n.checked_mul(10).ok_or_else(overflow)?;
+    }
+    Ok(n)
+}
+
+/// The inverse of `parse_decimal`: exactly `scale` fractional digits, a
+/// leading zero before the point, and a `-` for a negative value.
+fn format_decimal(value: i64, scale: u32) -> String {
+    let digits = value.unsigned_abs().to_string();
+    let scale = scale as usize;
+    let mut out = String::with_capacity(digits.len() + scale + 3);
+    if value < 0 {
+        out.push('-');
+    }
+    if scale == 0 {
+        out.push_str(&digits);
+    } else if digits.len() > scale {
+        let (int_part, frac_part) = digits.split_at(digits.len() - scale);
+        out.push_str(int_part);
+        out.push('.');
+        out.push_str(frac_part);
+    } else {
+        out.push_str("0.");
+        for _ in digits.len()..scale {
+            out.push('0');
+        }
+        out.push_str(&digits);
+    }
+    out
+}
+
+fn decimal_parse(args: &[LuaValue], gas: &mut GasMeter) -> Result<Vec<LuaValue>, VmError> {
+    let text = require_string(args, 0, "decimal.parse")?;
+    let scale = require_scale(args, 1, "decimal.parse")?;
+    gas.charge(text.len() as u64)?;
+    parse_decimal(text.as_bytes(), scale)
+        .map(|n| vec![LuaValue::Integer(n)])
+        .map_err(|reason| runtime_err(&format!("decimal.parse: {reason}")))
+}
+
+fn decimal_format(
+    args: &[LuaValue],
+    gas: &mut GasMeter,
+    mem: &mut MemoryMeter,
+) -> Result<Vec<LuaValue>, VmError> {
+    let value = require_integer(args, 0, "decimal.format")?;
+    let scale = require_scale(args, 1, "decimal.format")?;
+    let out = format_decimal(value, scale);
+    gas.charge(out.len() as u64)?;
+    mem.track_alloc(alloc_size::string(out.len()))?;
+    Ok(vec![LuaValue::String(LuaString::from_str(&out))])
+}
+
+fn decimal_rescale(args: &[LuaValue]) -> Result<Vec<LuaValue>, VmError> {
+    let value = require_integer(args, 0, "decimal.rescale")?;
+    let from = require_scale(args, 1, "decimal.rescale")?;
+    let to = require_scale(args, 2, "decimal.rescale")?;
+    let result = if to >= from {
+        value.checked_mul(10i64.pow(to - from)).ok_or_else(|| {
+            runtime_err(&format!(
+                "decimal.rescale: {value} from scale {from} to scale {to} does not fit in a 64-bit integer"
+            ))
+        })?
+    } else {
+        let divisor = 10i64.pow(from - to);
+        if value % divisor != 0 {
+            return Err(runtime_err(&format!(
+                "decimal.rescale: {} ({value} at scale {from}) has a non-zero digit beyond \
+                 scale {to}; digits are never dropped silently. To divide with truncation, \
+                 use math.scale_div",
+                format_decimal(value, from)
+            )));
+        }
+        value / divisor
+    };
+    Ok(vec![LuaValue::Integer(result)])
 }
 
 // ── table module ──────────────────────────────────────────────────────────────
@@ -1623,6 +1817,7 @@ pub fn build_globals() -> LuaTable {
     let math_mod = build_math_module();
     let table_mod = build_table_module();
     let json_mod = build_json_module();
+    let decimal_mod = build_decimal_module();
 
     g.rawset(
         LuaKey::String(LuaString::from_str("__string")),
@@ -1642,6 +1837,11 @@ pub fn build_globals() -> LuaTable {
     g.rawset(
         LuaKey::String(LuaString::from_str("__json")),
         LuaValue::Table(Rc::new(RefCell::new(json_mod))),
+    )
+    .unwrap();
+    g.rawset(
+        LuaKey::String(LuaString::from_str("__decimal")),
+        LuaValue::Table(Rc::new(RefCell::new(decimal_mod))),
     )
     .unwrap();
 
@@ -1739,6 +1939,23 @@ fn build_json_module() -> LuaTable {
         LuaValue::Builtin(BuiltinId::JsonDecodeStrings),
     )
     .unwrap();
+    t
+}
+
+fn build_decimal_module() -> LuaTable {
+    let mut t = LuaTable::new();
+    macro_rules! df {
+        ($k:expr, $id:expr) => {
+            t.rawset(
+                LuaKey::String(LuaString::from_str($k)),
+                LuaValue::Builtin($id),
+            )
+            .unwrap();
+        };
+    }
+    df!("parse", BuiltinId::DecimalParse);
+    df!("format", BuiltinId::DecimalFormat);
+    df!("rescale", BuiltinId::DecimalRescale);
     t
 }
 
@@ -2442,6 +2659,133 @@ mod tests {
     fn math_scale_div_zero_divisor() {
         let err = dispatch(BuiltinId::MathScaleDiv, vec![int(1), int(0), int(100)]).unwrap_err();
         assert!(matches!(err, VmError::RuntimeError(_)));
+    }
+
+    // ── decimal ───────────────────────────────────────────────────────────────
+
+    fn decimal_err(id: BuiltinId, args: Vec<LuaValue>) -> String {
+        match dispatch(id, args).unwrap_err() {
+            VmError::RuntimeError(LuaValue::String(m)) => {
+                String::from_utf8_lossy(m.as_bytes()).into_owned()
+            }
+            other => panic!("expected a runtime error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decimal_parse_format_round_trip_every_scale() {
+        let values = [
+            0,
+            1,
+            -1,
+            9,
+            10,
+            255075,
+            -255075,
+            999_999_999_999_999_999,
+            i64::MAX,
+            i64::MIN,
+            i64::MIN + 1,
+        ];
+        for scale in 0..=18 {
+            for &v in &values {
+                let text = format_decimal(v, scale);
+                assert_eq!(
+                    parse_decimal(text.as_bytes(), scale),
+                    Ok(v),
+                    "{text} @ {scale}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decimal_format_extremes() {
+        assert_eq!(format_decimal(i64::MAX, 0), "9223372036854775807");
+        assert_eq!(format_decimal(i64::MIN, 0), "-9223372036854775808");
+        assert_eq!(format_decimal(i64::MIN, 18), "-9.223372036854775808");
+        assert_eq!(format_decimal(i64::MAX, 18), "9.223372036854775807");
+        assert_eq!(format_decimal(1, 18), "0.000000000000000001");
+        assert_eq!(format_decimal(-5, 2), "-0.05");
+        assert_eq!(format_decimal(0, 3), "0.000");
+    }
+
+    #[test]
+    fn decimal_parse_i64_boundaries() {
+        assert_eq!(parse_decimal(b"9223372036854775807", 0), Ok(i64::MAX));
+        assert_eq!(parse_decimal(b"-9223372036854775808", 0), Ok(i64::MIN));
+        assert!(parse_decimal(b"9223372036854775808", 0).is_err());
+        assert!(parse_decimal(b"-9223372036854775809", 0).is_err());
+        // Overflow from padding alone, not from the digits written.
+        assert_eq!(parse_decimal(b"9.223372036854775807", 18), Ok(i64::MAX));
+        assert!(parse_decimal(b"10", 18).is_err());
+        assert!(parse_decimal(b"-10", 18).is_err());
+        // Leading zeros do not overflow.
+        assert_eq!(parse_decimal(b"000000000000000000000000001.5", 1), Ok(15));
+    }
+
+    #[test]
+    fn decimal_parse_via_dispatch() {
+        assert_eq!(
+            dispatch(BuiltinId::DecimalParse, vec![s("2550.75"), int(2)]).unwrap(),
+            vec![int(255075)]
+        );
+        let msg = decimal_err(BuiltinId::DecimalParse, vec![s("2550.755"), int(2)]);
+        assert!(msg.starts_with("decimal.parse: "), "{msg}");
+        assert!(
+            msg.contains("3 fractional digits, more than scale 2"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn decimal_scale_out_of_range_is_an_error() {
+        for scale in [-1, 19, i64::MIN, i64::MAX] {
+            let msg = decimal_err(BuiltinId::DecimalParse, vec![s("1"), int(scale)]);
+            assert!(msg.contains("scale must be between 0 and 18"), "{msg}");
+            let msg = decimal_err(BuiltinId::DecimalFormat, vec![int(1), int(scale)]);
+            assert!(msg.contains("scale must be between 0 and 18"), "{msg}");
+            let msg = decimal_err(BuiltinId::DecimalRescale, vec![int(1), int(scale), int(0)]);
+            assert!(msg.contains("scale must be between 0 and 18"), "{msg}");
+            let msg = decimal_err(BuiltinId::DecimalRescale, vec![int(1), int(0), int(scale)]);
+            assert!(msg.contains("scale must be between 0 and 18"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn decimal_rescale_extremes() {
+        let msg = decimal_err(
+            BuiltinId::DecimalRescale,
+            vec![int(i64::MIN), int(18), int(0)],
+        );
+        assert!(msg.contains("-9.223372036854775808"), "{msg}");
+        assert_eq!(
+            dispatch(
+                BuiltinId::DecimalRescale,
+                vec![int(i64::MIN), int(0), int(0)]
+            )
+            .unwrap(),
+            vec![int(i64::MIN)]
+        );
+        assert_eq!(
+            dispatch(
+                BuiltinId::DecimalRescale,
+                vec![int(-9_000_000_000_000_000_000), int(18), int(0)]
+            )
+            .unwrap(),
+            vec![int(-9)]
+        );
+        assert_eq!(
+            dispatch(BuiltinId::DecimalRescale, vec![int(-9), int(0), int(18)]).unwrap(),
+            vec![int(-9_000_000_000_000_000_000)]
+        );
+        let msg = decimal_err(BuiltinId::DecimalRescale, vec![int(-10), int(0), int(18)]);
+        assert!(msg.contains("does not fit in a 64-bit integer"), "{msg}");
+        let msg = decimal_err(
+            BuiltinId::DecimalRescale,
+            vec![int(i64::MIN), int(1), int(0)],
+        );
+        assert!(msg.contains("non-zero digit beyond scale 0"), "{msg}");
     }
 
     // ── table.insert / remove ─────────────────────────────────────────────────
