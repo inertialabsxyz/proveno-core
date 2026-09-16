@@ -490,8 +490,12 @@ impl<H: HostInterface> Vm<H> {
                 let raw_table_val = self.pop_value()?;
                 // Resolve sentinel strings to their module table from globals.
                 let table_val = self.resolve_sentinel(raw_table_val);
-                let t = table_val.as_table().map_err(VmError::from)?;
-                let result = t.borrow().get(&key).cloned().unwrap_or(LuaValue::Nil);
+                let result = if let LuaValue::String(_) = table_val {
+                    self.string_method(&key)?
+                } else {
+                    let t = table_val.as_table().map_err(VmError::from)?;
+                    t.borrow().get(&key).cloned().unwrap_or(LuaValue::Nil)
+                };
                 self.stack.push(StackSlot::Value(result));
             }
 
@@ -1221,6 +1225,30 @@ impl<H: HostInterface> Vm<H> {
             }
         }
         v
+    }
+
+    /// Resolve `s.name` for a string `s` in the string module, as Lua's string
+    /// metatable does, so `s:sub(2)` is `string.sub(s, 2)`. A name the module
+    /// lacks is an error naming it, not `nil`: the only use of a string field is
+    /// a method call, and "attempt to call nil" would not say which.
+    fn string_method(&self, key: &LuaKey) -> Result<LuaValue, VmError> {
+        let module = self
+            .globals
+            .get(&LuaKey::String(LuaString::from_str("__string")))
+            .and_then(|m| m.as_table().ok());
+        if let Some(f) = module.and_then(|m| m.borrow().get(key).cloned()) {
+            return Ok(f);
+        }
+        // GetField keys are string constants (see `constant_to_string_key`).
+        let name = match key {
+            LuaKey::String(s) => String::from_utf8_lossy(s.as_bytes()).into_owned(),
+            _ => String::new(),
+        };
+        Err(VmError::RuntimeError(LuaValue::String(
+            LuaString::from_str(&format!(
+                "string has no method '{name}' (string.{name} does not exist)"
+            )),
+        )))
     }
 
     /// Perform `table.sort` with optional Lua comparator (re-entrant dispatch).
